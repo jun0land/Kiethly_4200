@@ -1,0 +1,8 @@
+# 측정 데이터 (코드가 아니라 산출물 — 저장소에 안 넣음)
+sessions/
+it_data/
+cli_tools/iv_data/
+
+# 파이썬 캐시
+__pycache__/
+*.pyc

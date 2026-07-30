@@ -1,0 +1,61 @@
+{
+  "keithley_resource": "TCPIP::192.168.0.200::2105::SOCKET",
+  "visa_backend": "@py",
+  "visa_timeout_ms": 120000,
+  "mightex_port": "USB",
+  "mightex_baud": 9600,
+  "channels": {
+    "530nm": {
+      "channel": 3,
+      "max_mA": 1000
+    },
+    "850nm": {
+      "channel": 4,
+      "max_mA": 1000
+    }
+  },
+  "it": {
+    "bias_V": -1.0,
+    "dark_s": 5.0,
+    "light_s": 5.0,
+    "sample_interval_s": 0.05,
+    "compliance_A": 0.001,
+    "range_margin": 3.0,
+    "powers": {
+      "530nm": {
+        "OD0": {
+          "powers_mW": [
+            0.1,
+            0.2,
+            0.5,
+            1.0
+          ],
+          "percents": [
+            1.1,
+            2.2,
+            5.4,
+            10.9
+          ],
+          "expected_imax_A": null
+        },
+        "OD1": {
+          "powers_mW": [
+            0.01,
+            0.02,
+            0.05,
+            0.1
+          ],
+          "percents": [
+            1.1,
+            2.2,
+            5.4,
+            10.9
+          ],
+          "expected_imax_A": null
+        }
+      }
+    }
+  },
+  "output_dir": "it_data",
+  "sample_name": "FAPbI3_Si"
+}
