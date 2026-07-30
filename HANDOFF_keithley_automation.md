@@ -9,6 +9,40 @@
 > ⚠ 특히 "3. 실패한 접근"은 반드시 읽을 것. 여기 적힌 방법들은 이미 수 시간을
 > 들여 배제했으므로 다시 시도하면 시간 낭비다.
 
+## 0-6. Git으로 두 노트북 동기화하기
+
+측정에 실제로 쓸 노트북과 개발 중인 이 PC를 코드 기준으로 맞추기 위해
+git 저장소로 초기화했다(2026-07-30, 최초 커밋 `a3085d4`). `.gitignore`로
+`sessions/`, `it_data/`, `cli_tools/iv_data/`(측정 데이터, 코드 아님)와
+`__pycache__/`는 제외했다 — DLL(`KXCIclient.dll`, `Mightex_BLSDriver_SDK.dll`,
+`HIDDLL.dll`)과 설정 JSON은 전부 포함(재현에 필요하고 민감정보 없음).
+
+**원격 저장소는 아직 안 만들어짐 — 사용자가 GitHub에 비공개 저장소를 만들고
+아래 명령으로 최초 푸시해야 한다** (로그인이 필요한 단계라 에이전트가
+대신 못 함):
+
+```powershell
+# 1) github.com에서 새 저장소 생성 (Private 필수, README/gitignore/license 체크 해제)
+#    예: kiethly-4200-automation
+
+# 2) 이 폴더에서 원격 연결 + 푸시 (최초 1회, <URL>은 방금 만든 저장소 주소)
+cd C:\Users\mintj\Kiethly_4200
+git remote add origin <URL>
+git branch -M main
+git push -u origin main
+```
+
+**새 노트북에서 받아올 때** (Git for Windows만 있으면 됨, VSCode 불필요):
+```powershell
+git clone <URL>
+```
+
+**이후 업데이트가 있을 때마다** (이 PC에서 커밋+푸시된 뒤):
+```powershell
+cd Kiethly_4200
+git pull
+```
+
 ## 0. 이번 개정에서 달라진 것 (요약)
 
 - **`pd_iv_station.py`(KITE 스타일 4탭 GUI)를 새로 작성 완료.** 8절에서 요구한
