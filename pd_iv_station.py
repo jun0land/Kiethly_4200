@@ -700,7 +700,10 @@ class Session:
         ws_set.append([SEP_TOKEN])
 
         bracket = self.bracket_code()
-        fname = f"({safe_filename(display_name)})[{bracket}].xlsx"
+        # 파일명 서식: [측정순서] (샘플명).xlsx
+        # pd_app 파서는 소괄호/대괄호를 각각 독립적으로 re.search 하므로 순서에
+        # 구애받지 않는다(양쪽 순서 모두 동일하게 파싱되는 것을 확인함).
+        fname = f"[{bracket}] ({safe_filename(display_name)}).xlsx"
         path = os.path.join(out_dir, fname)
         wb.save(path)
         return path
@@ -942,10 +945,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PD 측정 스테이션 — Keithley 4200 + BioLED")
-        self.geometry("1200x840")
+        self.geometry("1280x900")
         # 탭3의 파장/OD/프리셋/버튼 한 줄, 탭1의 8열 SMU 표 등이 이보다 좁으면
         # 버튼이나 안내문구가 잘린다 — 최소 크기를 강제해서 방지.
-        self.minsize(1150, 720)
+        self.minsize(1150, 780)
 
         self.station_cfg = load_json(STATION_CONFIG_FILE, DEFAULT_STATION_CONFIG)
         self.presets_cfg = load_json(STATION_PRESETS_FILE, DEFAULT_STATION_PRESETS)
@@ -1053,7 +1056,7 @@ class App(tk.Tk):
         self._build_tab_measure()
         self._build_tab_run()
         self._build_tab_it()
-        paned.add(self.nb, weight=4)
+        paned.add(self.nb, weight=6)   # 그래프가 세로로 눌리지 않게 탭 쪽에 더 배분
 
         bottom = ttk.Frame(paned, padding=6)
         ttk.Label(bottom, text="로그 (경계선을 위아래로 드래그하면 높이 조절)").pack(anchor="w")
@@ -1486,15 +1489,18 @@ class App(tk.Tk):
         self.session_lbl = ttk.Label(top, text="세션: (없음)")
         self.session_lbl.grid(row=0, column=3, padx=10)
 
-        dark_frame = ttk.LabelFrame(frame, text="Dark", padding=8)
-        dark_frame.pack(fill="x", pady=8)
-        ttk.Button(dark_frame, text="Dark 0→−1V 측정",
-                  command=lambda: self._run_worker(self._measure_dark, "neg")).pack(side="left", padx=4)
-        ttk.Button(dark_frame, text="Dark 0→+1V 측정",
-                  command=lambda: self._run_worker(self._measure_dark, "pos")).pack(side="left", padx=4)
+        # Dark 버튼은 별도 LabelFrame 없이 세션 줄에 붙인다 — 세로 공간을 아껴
+        # 그래프에 넘겨주기 위함(예전엔 이 프레임 하나가 60px 가까이 먹었다).
+        ttk.Separator(top, orient="vertical").grid(row=0, column=4, sticky="ns", padx=10)
+        ttk.Button(top, text="Dark 0→−1V 측정",
+                  command=lambda: self._run_worker(self._measure_dark, "neg")
+                  ).grid(row=0, column=5, padx=3)
+        ttk.Button(top, text="Dark 0→+1V 측정",
+                  command=lambda: self._run_worker(self._measure_dark, "pos")
+                  ).grid(row=0, column=6, padx=3)
 
         light_frame = ttk.LabelFrame(frame, text="광전류 (−1→+1V, 한번에)", padding=8)
-        light_frame.pack(fill="x", pady=8)
+        light_frame.pack(fill="x", pady=(6, 4))
         ttk.Label(light_frame, text="파장(브래킷 코드)").grid(row=0, column=0, sticky="w")
         self.wl_var = tk.StringVar(value=WL_DISPLAY[WAVELENGTHS[0]])
         ttk.Combobox(light_frame, textvariable=self.wl_var,
@@ -1550,11 +1556,9 @@ class App(tk.Tk):
                   ).pack(side="left", padx=4)
 
         ttk.Label(live, foreground="gray", wraplength=1040, justify="left",
-                 text="슬라이더를 드래그하거나, 숫자칸을 클릭한 뒤 ↑/↓ 키로 0.1 %씩 미세조정하면 "
-                      "BioLED에 즉시 반영된다(연결돼 있을 때). 파워미터를 보며 원하는 광량(예: 1 mW)에 "
-                      "맞춘 뒤 '+ 현재 세기를 프리셋으로'를 누르면 그 값이 그대로 저장된다 — 세기를 다시 "
-                      "입력할 필요 없음."
-                 ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(4, 0))
+                 text="슬라이더 드래그 / 숫자칸 클릭 후 ↑↓키로 0.1 %씩 → 즉시 반영. 파워미터로 맞춘 뒤 "
+                      "'+ 현재 세기를 프리셋으로'. OD = ND 필터 값(OD0=필터 없음), 새 OD는 직접 입력."
+                 ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(2, 0))
 
         # (실시간 조절 상태 변수는 __init__에서 초기화 — _build 도중 실패해도
         #  destroy -> disconnect_all 경로에서 AttributeError가 안 나도록)
@@ -1562,11 +1566,19 @@ class App(tk.Tk):
         self.wl_var.trace_add("write", lambda *_: self._refresh_od_options())
         self.od_var.trace_add("write", lambda *_: self._refresh_led_presets())
         self._refresh_od_options()
-        ttk.Label(frame, text="OD는 ND 필터 값(예: OD0=필터 없음, OD1, OD2...)을 사람이 정하는 값이다 — "
-                              "같은 %라도 OD가 다르면 실제 광량이 다르므로 프리셋을 OD별로 나눠 등록한다. "
-                              "새 OD는 그 칸에 직접 입력하고 '+ 프리셋 추가'를 누르면 새로 생긴다. "
-                              "드롭다운에서 프리셋을 고른 뒤 '프리셋 수정'/'프리셋 삭제'로 바꾸거나 지울 수 있다.",
-                 foreground="gray", wraplength=1050).pack(anchor="w", pady=(6, 0))
+        # ⚠ 내보내기 줄을 **mid보다 먼저** side="bottom"으로 배치한다.
+        # 이렇게 해야 tkinter가 이 줄의 높이를 먼저 확보하고 남은 공간을 그래프에
+        # 준다. 예전에는 이 컨트롤들이 목록 옆 버튼단 안에 있어서, 세로 공간이
+        # 모자라면 조용히 잘려 "내보내기 버튼이 없다"고 보였다.
+        export_bar = ttk.LabelFrame(frame, text="내보내기", padding=8)
+        export_bar.pack(fill="x", side="bottom", pady=(6, 0))
+        ttk.Button(export_bar, text="엑셀 내보내기", command=self.export_excel
+                  ).pack(side="left", padx=(0, 12))
+        self.bracket_lbl = ttk.Label(export_bar, text="브래킷: ", font=("", 9, "bold"))
+        self.bracket_lbl.pack(side="left", padx=(0, 16))
+        self.filename_lbl = ttk.Label(export_bar, text="내보낼 파일명: (없음)", foreground="#555")
+        self.filename_lbl.pack(side="left")
+        self.sample_name_var.trace_add("write", lambda *_: self._refresh_trace_list())
 
         mid = ttk.Frame(frame)
         mid.pack(fill="both", expand=True, pady=8)
@@ -1575,28 +1587,20 @@ class App(tk.Tk):
         list_frame = ttk.LabelFrame(mid, text="측정된 트레이스", padding=8)
         list_frame.pack(fill="y", expand=False, side="left")
         self.trace_tree = ttk.Treeview(list_frame, columns=("label", "range"),
-                                       show="headings", height=10)
+                                       show="headings", height=8)
         self.trace_tree.heading("label", text="라벨")
         self.trace_tree.heading("range", text="Range I")
         self.trace_tree.column("label", width=90)
         self.trace_tree.column("range", width=70)
-        self.trace_tree.pack(fill="y", expand=False, side="left")
+        self.trace_tree.pack(fill="y", expand=True, side="left")
         btn_col = ttk.Frame(list_frame)
         btn_col.pack(side="left", padx=8, fill="y")
-        ttk.Label(btn_col, text="실제 4200은 실행/Append만 되고\n시트 이름 지정·중간 삭제가 안 되지만,\n"
-                               "여기서는 엑셀을 우리가 직접 만들기 때문에\n선택 삭제·라벨 수정·순서 변경이 됩니다.",
-                 foreground="gray", justify="left").pack(pady=(0, 8), anchor="w")
         ttk.Button(btn_col, text="선택 삭제", command=self.delete_selected_trace).pack(pady=2, fill="x")
         ttk.Button(btn_col, text="라벨 수정", command=self.edit_selected_label).pack(pady=2, fill="x")
         ttk.Button(btn_col, text="위로 ▲", command=lambda: self.move_selected(-1)).pack(pady=2, fill="x")
         ttk.Button(btn_col, text="아래로 ▼", command=lambda: self.move_selected(1)).pack(pady=2, fill="x")
-        ttk.Button(btn_col, text="엑셀 내보내기", command=self.export_excel).pack(pady=(10, 2), fill="x")
-        self.bracket_lbl = ttk.Label(btn_col, text="브래킷: ")
-        self.bracket_lbl.pack(anchor="w")
-        self.filename_lbl = ttk.Label(btn_col, text="내보낼 파일명: (없음)",
-                                      foreground="#555", wraplength=160, justify="left")
-        self.filename_lbl.pack(pady=(2, 8), anchor="w")
-        self.sample_name_var.trace_add("write", lambda *_: self._refresh_trace_list())
+        ttk.Label(btn_col, text="중간 삭제·순서 변경\n모두 가능", foreground="gray",
+                 justify="left").pack(pady=(8, 0), anchor="w")
 
         plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일, 8:10 비율)", padding=4)
         plot_frame.pack(fill="both", expand=True, side="left", padx=(8, 0))
@@ -1914,7 +1918,7 @@ class App(tk.Tk):
         # (샘플명)[브래킷코드].xlsx 형식으로 자동 조합되며, 샘플명 칸을 고치면
         # 이 미리보기도 즉시 따라 바뀐다.
         name = self.sample_name_var.get().strip() or (self.session.sample_name if self.session else "")
-        self.filename_lbl.config(text=f"내보낼 파일명: ({safe_filename(name)})[{bracket}].xlsx")
+        self.filename_lbl.config(text=f"내보낼 파일명:  [{bracket}] ({safe_filename(name)}).xlsx")
         self._redraw_plot()
 
     def _selected_index(self):
