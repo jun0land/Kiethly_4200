@@ -419,6 +419,8 @@ class BioLED:
         self.log = log
         self.dll = None
         self.handle = None
+        self.channels = None     # 장비가 실제로 가진 채널 수 (연결 후 조회)
+        self.serial = ""
         if dry:
             return
 
@@ -457,8 +459,26 @@ class BioLED:
 
         buf = ctypes.create_string_buffer(32)
         dll.MTUSB_BLSDriverGetSerialNo(handle, buf, 32)
-        nch = dll.MTUSB_BLSDriverGetChannels(handle)
-        self.log(f"[LED] Serial={buf.value.decode(errors='ignore')!r}, Channels={nch}")
+        self.serial = buf.value.decode(errors="ignore")
+        # ⚠ 장비가 실제로 가진 채널 수. BLS-SA02-U는 이름 그대로 채널이 몇 개
+        # 없는데, 예전 코드는 파장 8개를 ch1~ch8에 기계적으로 배정해놓고 이
+        # 값을 **조회만 하고 검증하지 않았다** — 없는 채널(ch6 등)에 명령을
+        # 보내면 SDK가 ret=-1을 돌려주는데, 매뉴얼상 -1이 "invalid handle"로
+        # 적혀 있어 핸들 문제로 오해하기 딱 좋았다. 이제 미리 막는다.
+        self.channels = dll.MTUSB_BLSDriverGetChannels(handle)
+        self.log(f"[LED] Serial={self.serial!r}, 사용 가능한 채널 수={self.channels}")
+
+    def _check_channel(self, channel):
+        """장비에 없는 채널이면 즉시 사람이 이해할 수 있는 오류로 막는다."""
+        if self.dry:
+            return
+        if self.channels is not None and self.channels > 0 and not (1 <= channel <= self.channels):
+            raise RuntimeError(
+                f"이 BioLED 장비에는 채널 {channel}번이 없습니다 "
+                f"(사용 가능: 1~{self.channels}번).\n\n"
+                "파장↔채널 배정이 실제 장비와 다릅니다. 상단 'BioLED 채널 설정'에서 "
+                "실제로 LED가 꽂힌 채널 번호로 고쳐주세요."
+            )
 
     def set_percent(self, channel, percent):
         """percent: 0~100 (%). 장치 API는 '0.1%' 단위 정수를 받는다
@@ -466,22 +486,25 @@ class BioLED:
         if self.dry:
             self.log(f"    [LED] ch{channel} NORMAL, {percent}%")
             return
+        self._check_channel(channel)
         self.dll.MTUSB_BLSDriverSetMode(self.handle, channel, BLS_MODE_NORMAL)
         tenths = int(round(percent * 10))
         ret = self.dll.MTUSB_BLSDriverSetNormalCurrent(self.handle, channel, tenths)
         if ret not in (0, None):
             self.log(f"    ⚠ SetNormalCurrent(ch{channel}, {percent}%) ret={ret} "
-                    "(-1=핸들 오류, 1=장치 오류)")
+                    f"(-1=핸들/채널 오류, 1=장치 오류 / 이 장비 채널 수={self.channels})")
 
     def off(self, channel):
         if self.dry:
             self.log(f"    [LED] ch{channel} OFF")
             return
+        self._check_channel(channel)
         self.dll.MTUSB_BLSDriverSetMode(self.handle, channel, BLS_MODE_DISABLE)
 
     def close(self):
         if not self.dry and self.dll and self.handle is not None:
             self.dll.MTUSB_BLSDriverCloseDevice(self.handle)
+            self.handle = None      # 닫은 핸들을 다시 쓰지 않도록 무효화
 
 
 # ==========================================================
@@ -861,9 +884,12 @@ class App(tk.Tk):
         self._live_after_id = None
         self._live_is_on = False
         self._live_wl = None     # 현재 실제로 출력 중인 파장(파장 전환 시 이전 채널 소등용)
+        self._live_applying = False   # 스냅용 set()의 재진입 방지
+        self._live_error = None       # 마지막 적용 실패 사유(예외 대신 여기 담음)
 
         self._build()
         self._on_dry_run_change()
+        self._refresh_live_state()   # 시작 시 '● BioLED 미연결'로 표시
         self._drain_after_id = self.after(150, self._drain_queue)
 
     def _on_dry_run_change(self):
@@ -917,15 +943,19 @@ class App(tk.Tk):
         top.pack(fill="x")
         ttk.Checkbutton(top, text="Dry-run(장비 없이 로직만)", variable=self.dry_run
                         ).pack(side="left")
-        ttk.Label(top, text="  ").pack(side="left")
-        self.conn_status = ttk.Label(top, text="● 미연결", foreground="gray")
+        ttk.Label(top, text="   ").pack(side="left")
+        # --- Keithley 상태 ---
+        self.conn_status = ttk.Label(top, text="● Keithley 미연결", foreground="gray")
         self.conn_status.pack(side="left")
         ttk.Button(top, text="Keithley 연결", command=self.connect_smu).pack(side="left", padx=4)
-        ttk.Label(top, text="  ").pack(side="left")
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
+        # --- BioLED 상태 (연결 여부를 한눈에) ---
+        self.led_status = ttk.Label(top, text="● BioLED 미연결", foreground="gray")
+        self.led_status.pack(side="left")
         ttk.Button(top, text="BioLED 연결", command=self.connect_led).pack(side="left", padx=4)
+        ttk.Button(top, text="채널 설정", command=self.edit_led_channels).pack(side="left", padx=2)
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Button(top, text="모두 해제", command=self.disconnect_all).pack(side="left", padx=4)
-        ttk.Label(top, text="  (BioLED는 USB HID 장치라 포트 설정이 필요 없음 — 그냥 연결만 누르면 됨)",
-                 foreground="gray").pack(side="left")
 
         # 탭 영역과 로그 창 사이에 드래그 가능한 구분선(sash)을 둬서
         # 로그 창 높이를 사용자가 직접 조절할 수 있게 한다.
@@ -977,6 +1007,12 @@ class App(tk.Tk):
         try:
             self.led = BioLED(dry=self.dry_run.get(), log=self.log)
             self.log("[LED] 연결됨")
+            nch = self.led.channels
+            self.led_status.config(
+                text=f"● BioLED 연결됨 (ch 1~{nch})" if nch else "● BioLED 연결됨",
+                foreground="green")
+            self._warn_channel_mapping(nch)
+            self._refresh_live_state()
         except BaseException as e:  # noqa: BLE001
             self.log(f"✘ BioLED 연결 실패: {type(e).__name__}: {e}")
             messagebox.showerror(
@@ -999,8 +1035,21 @@ class App(tk.Tk):
                 pass
             self.led.close()
             self.led = None
+            self.led_status.config(text="● BioLED 미연결", foreground="gray")
         self._live_is_on = False
         self._live_wl = None
+        self._refresh_live_state()
+
+    def _warn_channel_mapping(self, nch):
+        """장비 채널 수보다 큰 번호로 배정된 파장이 있으면 미리 경고한다.
+        (예전에는 없는 채널로 명령을 보내 ret=-1만 뜨고 원인을 알 수 없었다)"""
+        if not nch or nch <= 0:
+            return
+        bad = [PRETTY_LABEL[wl] for wl, info in self.led_settings.get("channels", {}).items()
+               if wl in PRETTY_LABEL and info.get("channel", 0) > nch]
+        if bad:
+            self.log(f"[LED] ⚠ 이 장비는 채널이 {nch}개뿐인데 다음 파장이 그보다 큰 번호로 "
+                    f"배정돼 있습니다: {', '.join(bad)} — 상단 '채널 설정'에서 고치세요.")
 
     # ======================================================
     # 탭 0 · 사용법
@@ -1331,21 +1380,28 @@ class App(tk.Tk):
 
         self.live_on_btn = ttk.Button(live, text="켜기", width=6, command=self.live_on)
         self.live_on_btn.grid(row=0, column=3, padx=2)
-        ttk.Button(live, text="끄기", width=6, command=self.live_off).grid(row=0, column=4, padx=2)
+        self.live_off_btn = ttk.Button(live, text="끄기", width=6, command=self.live_off)
+        self.live_off_btn.grid(row=0, column=4, padx=2)
+        # 지금 실제로 빛이 나오고 있는지를 항상 표시 (버튼만으로는 상태를 알 수 없음)
+        self.live_state_lbl = tk.Label(live, text="○ 꺼짐", width=22, anchor="w",
+                                       font=("", 9, "bold"), fg="#666")
+        self.live_state_lbl.grid(row=0, column=5, padx=(10, 4))
 
-        ttk.Button(live, text="+ 현재 세기를 프리셋으로", command=self.add_led_preset
-                  ).grid(row=0, column=5, padx=(14, 4))
-        ttk.Button(live, text="프리셋 수정", command=self.edit_led_preset
-                  ).grid(row=0, column=6, padx=4)
-        ttk.Button(live, text="프리셋 삭제", command=self.delete_led_preset
-                  ).grid(row=0, column=7, padx=4)
+        preset_row = ttk.Frame(live)
+        preset_row.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
+        ttk.Button(preset_row, text="+ 현재 세기를 프리셋으로", command=self.add_led_preset
+                  ).pack(side="left", padx=(0, 4))
+        ttk.Button(preset_row, text="프리셋 수정", command=self.edit_led_preset
+                  ).pack(side="left", padx=4)
+        ttk.Button(preset_row, text="프리셋 삭제", command=self.delete_led_preset
+                  ).pack(side="left", padx=4)
 
         ttk.Label(live, foreground="gray", wraplength=1040, justify="left",
                  text="슬라이더를 드래그하거나, 숫자칸을 클릭한 뒤 ↑/↓ 키로 0.1 %씩 미세조정하면 "
                       "BioLED에 즉시 반영된다(연결돼 있을 때). 파워미터를 보며 원하는 광량(예: 1 mW)에 "
                       "맞춘 뒤 '+ 현재 세기를 프리셋으로'를 누르면 그 값이 그대로 저장된다 — 세기를 다시 "
                       "입력할 필요 없음."
-                 ).grid(row=1, column=0, columnspan=8, sticky="w", pady=(4, 0))
+                 ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(4, 0))
 
         # (실시간 조절 상태 변수는 __init__에서 초기화 — _build 도중 실패해도
         #  destroy -> disconnect_all 경로에서 AttributeError가 안 나도록)
@@ -1430,13 +1486,24 @@ class App(tk.Tk):
 
     def _apply_live_percent(self):
         self._live_after_id = None
+        if getattr(self, "_live_applying", False):
+            return  # 스냅용 .set()이 Scale 콜백을 다시 부르는 재진입 방지
         pct = round(float(self.live_pct_var.get()), 1)
         # 슬라이더는 연속값이라 0.1 단위로 스냅해 표시/저장값을 깔끔하게 유지
         if abs(pct - float(self.live_pct_var.get())) > 1e-9:
-            self.live_pct_var.set(pct)
+            self._live_applying = True
+            try:
+                self.live_pct_var.set(pct)
+            finally:
+                self._live_applying = False
         if self.led is None or not self._live_is_on:
-            return  # 미연결이거나 '켜기' 전이면 값만 바꾸고 실제 출력은 안 건드림
+            self._refresh_live_state()
+            return True  # 미연결이거나 '켜기' 전이면 값만 바꾸고 실제 출력은 안 건드림
         wl = self._wl_key()
+        # ⚠ 여기서 예외를 던지면 안 된다 — 슬라이더 드래그는 after() 타이머
+        # 콜백으로 들어오므로, 예외가 tkinter 밖으로 새면 화면에 아무것도 안
+        # 뜨고 조용히 죽는다. 실패 사유는 _live_error에 담아 호출자가 쓴다.
+        self._live_error = None
         try:
             # 켠 상태로 파장을 바꿨다면 이전 채널을 먼저 끈다
             # (단일 광원 측정 가정 — 두 파장이 동시에 켜지면 안 됨)
@@ -1446,23 +1513,56 @@ class App(tk.Tk):
             ch_info = self.led_settings["channels"][wl]
             self.led.set_percent(ch_info["channel"], pct)
             self._live_wl = wl
+            return True
         except Exception as e:  # noqa: BLE001
+            self._live_is_on = False
+            self._live_wl = None
+            self._live_error = e
             self.log(f"✘ LED 세기 적용 실패: {e}")
+            return False
+        finally:
+            self._refresh_live_state()
+
+    def _refresh_live_state(self):
+        """'지금 빛이 나오고 있는가'를 화면에 항상 정확히 표시한다.
+        버튼만 있으면 뭐가 눌린 상태인지 알 수 없어서 별도 표시가 필요하다."""
+        if not hasattr(self, "live_state_lbl"):
+            return
+        if self.led is None:
+            self.live_state_lbl.config(text="○ BioLED 미연결", fg="#999")
+            self.live_on_btn.state(["disabled"])
+            self.live_off_btn.state(["disabled"])
+            return
+        self.live_on_btn.state(["!disabled"])
+        self.live_off_btn.state(["!disabled"])
+        if self._live_is_on and self._live_wl:
+            self.live_state_lbl.config(
+                text=f"● 출력 중  {PRETTY_LABEL[self._live_wl]} @ {self.live_pct_var.get():.1f}%",
+                fg="#0a7d28")
+            self.live_on_btn.state(["disabled"])   # 이미 켜져 있음
+        else:
+            self.live_state_lbl.config(text="○ 꺼짐", fg="#666")
+            self.live_off_btn.state(["disabled"])  # 이미 꺼져 있음
 
     def live_on(self):
         if self.led is None:
             messagebox.showwarning("미연결", "먼저 상단 'BioLED 연결'을 누르세요.")
             return
         self._live_is_on = True
-        self._apply_live_percent()
+        if not self._apply_live_percent():
+            err = getattr(self, "_live_error", None)
+            messagebox.showerror("LED 켜기 실패", str(err) if err else "알 수 없는 오류")
+            return
         wl = self._wl_key()
         self.log(f"[LED] {PRETTY_LABEL[wl]} 실시간 조절 켜짐 @ {self.live_pct_var.get():.1f}% "
                 "— 파워미터 보며 맞춘 뒤 '+ 현재 세기를 프리셋으로'")
+        self._refresh_live_state()
 
     def live_off(self):
         self._live_is_on = False
         if self.led is None:
             self._live_wl = None
+            self._refresh_live_state()
             return
         wl = self._live_wl or self._wl_key()
         try:
@@ -1472,6 +1572,51 @@ class App(tk.Tk):
             self.log(f"✘ LED 끄기 실패: {e}")
         finally:
             self._live_wl = None
+            self._refresh_live_state()
+
+    def edit_led_channels(self):
+        """파장 ↔ BioLED 채널 번호 배정 편집.
+
+        기본값은 파장 8개를 ch1~ch8에 기계적으로 배정하지만, 실제 장비는
+        채널이 그보다 적을 수 있다(BLS-SA02 등). 실제로 LED가 꽂힌 채널
+        번호로 맞춰줘야 한다."""
+        top = tk.Toplevel(self)
+        top.title("BioLED 채널 설정")
+        top.transient(self)
+        top.resizable(False, False)
+
+        nch = self.led.channels if (self.led and self.led.channels) else None
+        head = ("파장별로 BioLED의 몇 번 채널에 연결돼 있는지 지정하세요.\n"
+                + (f"이 장비에서 사용 가능한 채널: 1 ~ {nch}번"
+                   if nch else "장비 미연결 — 연결하면 사용 가능한 채널 수를 확인할 수 있습니다."))
+        ttk.Label(top, text=head, justify="left").pack(padx=14, pady=(14, 8), anchor="w")
+
+        body = ttk.Frame(top)
+        body.pack(padx=14)
+        vars_ = {}
+        for i, wl in enumerate(WAVELENGTHS):
+            ttk.Label(body, text=PRETTY_LABEL[wl], width=10, anchor="w").grid(
+                row=i, column=0, sticky="w", pady=2)
+            v = tk.IntVar(value=self.led_settings["channels"].get(wl, {}).get("channel", i + 1))
+            ttk.Spinbox(body, from_=1, to=(nch or 8), textvariable=v, width=6).grid(
+                row=i, column=1, pady=2)
+            vars_[wl] = v
+
+        def save():
+            for wl, v in vars_.items():
+                self.led_settings.setdefault("channels", {}).setdefault(wl, {})["channel"] = int(v.get())
+            save_json(BIOLED_SETTINGS_FILE, self.led_settings)
+            self.log("[LED] 채널 배정 저장됨 — " + ", ".join(
+                f"{PRETTY_LABEL[wl]}=ch{v.get()}" for wl, v in vars_.items()))
+            top.destroy()
+
+        btns = ttk.Frame(top)
+        btns.pack(padx=14, pady=12)
+        ttk.Button(btns, text="저장", command=save).pack(side="left", padx=4)
+        ttk.Button(btns, text="취소", command=top.destroy).pack(side="left", padx=4)
+        top.update_idletasks()
+        top.grab_set()
+        top.wait_window()
 
     def _ask_focused(self, title, prompt, initial=""):
         """입력칸에 **자동으로 커서가 들어가 있는** 한 줄 입력창.
@@ -1860,6 +2005,7 @@ class App(tk.Tk):
                 # (UI만 '켜짐'으로 남아 있으면 사용자가 오해한다)
                 self._live_is_on = False
                 self._live_wl = None
+                self.after(0, self._refresh_live_state)
 
         rec = self.session.add_trace(label, range_A, data)
         self.log(f"[측정] {label} 완료: {len(data)}점 -> {rec['csv_path']}")
