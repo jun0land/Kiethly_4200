@@ -85,6 +85,13 @@ TRACE_COLORS = {
 FALLBACK_TRACE_COLORS = ["#000000", "#FF0000", "#0000FF", "#00A000", "#FF00FF",
                          "#FF8000", "#008080", "#8000FF", "#808000", "#4169E1"]
 
+# 콤보박스 표시 문자열은 한 곳에서만 정의한다 — 예전에 목록과 복원용 라벨을
+# 따로 하드코딩해두는 바람에, 표기를 바꾸면 프리셋 불러오기가 조용히 깨졌다.
+# 적분시간은 KITE의 "Speed"와 같은 것이라 그 이름을 병기한다.
+IT_OPTS = ["1:Short(KITE Fast)", "2:Medium(KITE Normal)",
+           "3:Long(KITE Quiet)", "4:Custom"]
+SWEEP_OPTS = ["1:Linear", "2:Log10", "3:Log25", "4:Log50"]
+
 _NUM = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 # KXCI list-mode 응답 토큰은 "N-1.00000E+00"처럼 앞에 한 글자 상태 코드가
 # 붙는다(공백 있는 경우도 있음: "N 0.00000E+00"). 그룹1=상태코드, 그룹2=숫자.
@@ -399,10 +406,21 @@ class Keithley4200:
 
     def set_range_fixed(self, ch, range_A, compliance_A):
         """RI(즉시 고정)를 우선 시도하고, Syntax Error 비트가 뜨면 RG(하한만 지정)로
-        자동 폴백한다 — HANDOFF 9번 '미해결 항목 #3' 대응."""
+        자동 폴백한다.
+
+        ⚠ **컴플라이언스는 고정 레인지보다 클 수 없다.** 예전 기본값이
+        Range 10uA + 컴플라이언스 1mA(100배)라 모순된 조합이었고, 이것이
+        RI Syntax Error의 원인으로 보인다(장비가 RI를 지원하지 않아서가
+        아니라). 실제 KITE 측정 파일도 Range 100uA / 컴플라이언스 11uA로
+        레인지 안쪽 값을 쓴다."""
+        if compliance_A > range_A:
+            self.log(f"    ⚠ 컴플라이언스({compliance_A:g}A)가 Range I({range_A:g}A)보다 큽니다 "
+                    "— RI는 이 조합을 거부합니다. 탭2에서 컴플라이언스를 Range 이하로 "
+                    "낮추세요(그대로 진행하면 RG 폴백으로 오토레인징이 됩니다).")
         self._w(f"RI{ch},{range_A:g},{compliance_A:g}")
         if not self.dry and (self.spoll() & BIT_SYNTAX_ERR):
-            self.log(f"    ⚠ RI{ch} Syntax Error — RG{ch}로 폴백")
+            self.log(f"    ⚠ RI{ch} Syntax Error — RG{ch}로 폴백 "
+                    "(컴플라이언스 > Range 조합이면 이게 원인)")
             self._w("BC")  # 에러/버퍼 비트 클리어
             self._w(f"RG{ch},{range_A:g}")
 
@@ -691,14 +709,22 @@ DEFAULT_STATION_PRESETS = {
     "presets": {
         "default": {
             # 전압 스텝 기본 0.01 V — Dark는 101점, 광전류(-1~+1)는 201점이 된다
-            "dark_neg": {"start": 0.0, "stop": -1.0, "step": 0.01, "compliance": 1e-3},
-            "dark_pos": {"start": 0.0, "stop": 1.0, "step": 0.01, "compliance": 1e-3},
-            "photo": {"start": -1.0, "stop": 1.0, "step": 0.01, "compliance": 1e-3},
+            # 컴플라이언스는 **Range I를 넘으면 안 된다**(고정 레인지보다 큰
+            # 컴플라이언스는 모순이라 RI가 Syntax Error를 낸다). Range 100uA에
+            # 맞춰 100uA로 둔다. 소자 보호를 더 강하게 하려면 낮출 것 —
+            # 참고로 실제 KITE 측정 파일은 11uA(1.1e-5)를 썼다.
+            "dark_neg": {"start": 0.0, "stop": -1.0, "step": 0.01, "compliance": 1e-4},
+            "dark_pos": {"start": 0.0, "stop": 1.0, "step": 0.01, "compliance": 1e-4},
+            "photo": {"start": -1.0, "stop": 1.0, "step": 0.01, "compliance": 1e-4},
             "sweep_type": 1,
-            "integration": {"mode": 1, "delay": 0, "filter": 0, "plc": 1.0},
+            # 적분시간 = KITE의 "Speed"에 해당. 실제 랩 측정 파일(example/15s_1)이
+            # Speed=Normal 이었으므로 그에 맞춰 Medium(2)을 기본으로 둔다.
+            # (기존 기본값 Short(1)=Fast 라서 평소보다 측정이 빨리 끝났던 것)
+            "integration": {"mode": 2, "delay": 0, "filter": 0, "plc": 1.0},
             "resolution_digits": 6,
             "range_mode": "RI",       # auto / RI / RG
-            "range_A": 1e-5,
+            "range_A": 1e-4,          # 100 uA — 실제 KITE 측정 파일과 동일
+
             "range_dark_same": True,
         }
     },
@@ -1238,14 +1264,14 @@ class App(tk.Tk):
 
         r = 9
         ttk.Label(frame, text="스윕 타입", font=("", 9, "bold")).grid(row=r, column=0, sticky="w", pady=(10, 2))
-        sweep_opts = ["1:Linear", "2:Log10", "3:Log25", "4:Log50"]
+        sweep_opts = SWEEP_OPTS
         self.sweep_type_var = tk.StringVar(value=sweep_opts[p["sweep_type"] - 1])
         ttk.Combobox(frame, textvariable=self.sweep_type_var, values=sweep_opts,
                     width=10, state="readonly").grid(row=r, column=1, sticky="w")
 
         r += 1
         ttk.Label(frame, text="적분시간(IT)", font=("", 9, "bold")).grid(row=r, column=0, sticky="w", pady=(10, 2))
-        it_opts = ["1:Short", "2:Medium", "3:Long", "4:Custom"]
+        it_opts = IT_OPTS
         self.it_mode_var = tk.StringVar(value=it_opts[p["integration"]["mode"] - 1])
         it_cb = ttk.Combobox(frame, textvariable=self.it_mode_var, values=it_opts,
                              width=10, state="readonly")
@@ -1340,8 +1366,8 @@ class App(tk.Tk):
         for key in ("dark_neg", "dark_pos", "photo"):
             for k, var in self.mvars[key].items():
                 var.set(p[key][k])
-        self.sweep_type_var.set(f"{p['sweep_type']}:" + {1: "Linear", 2: "Log10", 3: "Log25", 4: "Log50"}[p["sweep_type"]])
-        self.it_mode_var.set(f"{p['integration']['mode']}:" + {1: "Short", 2: "Medium", 3: "Long", 4: "Custom"}[p["integration"]["mode"]])
+        self.sweep_type_var.set(SWEEP_OPTS[p["sweep_type"] - 1])
+        self.it_mode_var.set(IT_OPTS[p["integration"]["mode"] - 1])
         self.it_delay_var.set(p["integration"]["delay"])
         self.it_filter_var.set(p["integration"]["filter"])
         self.it_plc_var.set(p["integration"]["plc"])
