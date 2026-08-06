@@ -92,10 +92,35 @@ IT_OPTS = ["1:Short(KITE Fast)", "2:Medium(KITE Normal)",
            "3:Long(KITE Quiet)", "4:Custom"]
 SWEEP_OPTS = ["1:Linear", "2:Log10", "3:Log25", "4:Log50"]
 
+# 그래프 작도 영역 비율 (가로:세로). 창 크기와 무관하게 이 비율을 유지한다.
+ASPECT_W, ASPECT_H = 8, 10
+
 _NUM = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 # KXCI list-mode 응답 토큰은 "N-1.00000E+00"처럼 앞에 한 글자 상태 코드가
 # 붙는다(공백 있는 경우도 있음: "N 0.00000E+00"). 그룹1=상태코드, 그룹2=숫자.
 _TOK_STATUS = re.compile(r"([A-Za-z])\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
+
+
+# 컴플라이언스는 고정 레인지의 105%까지 설정할 수 있다.
+# 근거: 실제 KITE 산출물(example/15s_1 [dd876543].xls)의 SMU1 컴플라이언스가
+# 0.105 A = 105 mA 로, 최대 레인지 100 mA의 정확히 105%였다. 같은 파일에서
+# SMU2는 컴플라이언스 11 uA인데 Range I가 10 uA가 아니라 100 uA인데, 이는
+# 11 uA가 10 uA 레인지의 105%(=10.5 uA)를 넘어 담기지 않기 때문이다.
+# ⚠ 105%는 위 실측값에서 역산한 것이고 매뉴얼 원문으로 확인한 값은 아니다.
+COMPLIANCE_OVERRANGE = 1.05
+
+
+def max_compliance_for(range_A: float) -> float:
+    """이 레인지에서 설정 가능한 최대 컴플라이언스."""
+    return range_A * COMPLIANCE_OVERRANGE
+
+
+def min_range_for(compliance_A: float) -> float:
+    """이 컴플라이언스를 담을 수 있는 가장 작은 레인지."""
+    for r in FIXED_RANGES_A:
+        if compliance_A <= max_compliance_for(r) * (1 + 1e-9):
+            return r
+    return FIXED_RANGES_A[-1]
 
 
 def pick_fixed_range(i_max_A: float, margin: float = 3.0) -> float:
@@ -1307,6 +1332,18 @@ class App(tk.Tk):
         ttk.Checkbutton(frame, text="Dark도 동일 Range 적용",
                         variable=self.range_dark_same_var).grid(row=r + 1, column=2, columnspan=2, sticky="w")
 
+        self.rc_note_lbl = ttk.Label(frame, foreground="#555", wraplength=900, justify="left", text="")
+        self.rc_note_lbl.grid(row=r + 2, column=0, columnspan=7, sticky="w", pady=(4, 0))
+
+        # Range ↔ 컴플라이언스 양방향 자동 보정 (KITE와 동일한 동작).
+        # 위젯이 다 만들어진 뒤에 연결해야 초기화 도중 콜백이 터지지 않는다.
+        self.range_mode_var.trace_add("write", lambda *_: self._sync_range_compliance("range"))
+        self.range_val_var.trace_add("write", lambda *_: self._sync_range_compliance("range"))
+        for key in ("dark_neg", "dark_pos", "photo"):
+            self.mvars[key]["compliance"].trace_add(
+                "write", lambda *_: self._sync_range_compliance("compliance"))
+        self._sync_range_compliance("init")
+
         r += 2
         btns = ttk.Frame(frame)
         btns.grid(row=r, column=0, columnspan=7, pady=14, sticky="w")
@@ -1319,6 +1356,62 @@ class App(tk.Tk):
         ttk.Button(btns, text="불러오기", command=self.load_preset).pack(side="left", padx=4)
         ttk.Button(btns, text="다른 이름으로 저장", command=self.save_preset_as).pack(side="left", padx=4)
         ttk.Button(btns, text="현재 프리셋에 저장", command=self.save_preset).pack(side="left", padx=4)
+
+    def _current_range_A(self):
+        for r in FIXED_RANGES_A:
+            if RANGE_LABELS[r] == self.range_val_var.get():
+                return r
+        return FIXED_RANGES_A[0]
+
+    def _sync_range_compliance(self, source):
+        """Range I ↔ 컴플라이언스 양방향 자동 보정 (KITE와 동일한 동작).
+
+        제약: 컴플라이언스 ≤ Range × 1.05. 고정 레인지(RI)일 때만 구속력이
+        있으므로 그 모드에서만 값을 건드린다.
+          - Range를 바꾸면  -> 범위를 넘는 컴플라이언스를 상한으로 클램프
+          - 컴플라이언스를 바꾸면 -> 그걸 담을 수 있는 최소 Range로 상향
+        Range는 스윕 3종이 공유하므로, 상향 판단은 **가장 큰 컴플라이언스**
+        기준으로 한다.
+        """
+        if getattr(self, "_rc_syncing", False):
+            return  # 한쪽을 고치면 다른 쪽 trace가 다시 불려 무한루프가 된다
+        keys = ("dark_neg", "dark_pos", "photo")
+        try:
+            comps = {k: self.mvars[k]["compliance"].get() for k in keys}
+            range_A = self._current_range_A()
+        except Exception:  # noqa: BLE001 — 입력칸을 지우는 중이면 get()이 실패한다
+            return
+
+        if self.range_mode_var.get() != "RI":
+            self.rc_note_lbl.config(
+                text="※ 고정 레인지(RI)가 아니면 Range↔컴플라이언스 자동 보정을 하지 않습니다.")
+            return
+
+        self._rc_syncing = True
+        try:
+            if source in ("range", "init"):
+                cap = max_compliance_for(range_A)
+                for k in keys:
+                    if comps[k] > cap * (1 + 1e-9):
+                        self.mvars[k]["compliance"].set(cap)
+                        self.log(f"[설정] {k} 컴플라이언스 {comps[k]:g} A → {cap:g} A 자동 조정 "
+                                f"(Range {format_range_i(range_A)}의 105% 상한)")
+            else:  # compliance
+                need = max(comps.values())
+                new_r = min_range_for(need)
+                if new_r > range_A:
+                    self.range_val_var.set(RANGE_LABELS[new_r])
+                    self.log(f"[설정] 컴플라이언스 {need:g} A를 담기 위해 Range I "
+                            f"{format_range_i(range_A)} → {format_range_i(new_r)} 자동 상향")
+                    range_A = new_r
+        finally:
+            self._rc_syncing = False
+
+        cap = max_compliance_for(self._current_range_A())
+        self.rc_note_lbl.config(
+            text=f"※ 고정 레인지(RI) 규칙: 컴플라이언스 ≤ Range × 1.05. "
+                 f"현재 Range {format_range_i(self._current_range_A())} → 컴플라이언스 상한 {cap:g} A. "
+                 "Range를 바꾸면 초과분이 자동으로 낮춰지고, 컴플라이언스를 키우면 Range가 자동으로 올라갑니다.")
 
     def _collect_measure_settings(self):
         def sw(key):
@@ -1426,7 +1519,7 @@ class App(tk.Tk):
 
         self.live_pct_var = tk.DoubleVar(value=0.0)
         self.live_scale = ttk.Scale(live, from_=0.0, to=100.0, orient="horizontal",
-                                    variable=self.live_pct_var, length=430,
+                                    variable=self.live_pct_var, length=260,
                                     command=lambda _v: self._on_live_scale())
         self.live_scale.grid(row=0, column=0, padx=(0, 8), pady=2)
 
@@ -1478,12 +1571,16 @@ class App(tk.Tk):
         mid = ttk.Frame(frame)
         mid.pack(fill="both", expand=True, pady=8)
 
+        # 그래프에 폭을 몰아주기 위해 목록 쪽은 늘어나지 않게 고정(expand=False).
         list_frame = ttk.LabelFrame(mid, text="측정된 트레이스", padding=8)
-        list_frame.pack(fill="both", expand=True, side="left")
-        self.trace_tree = ttk.Treeview(list_frame, columns=("label", "range"), show="headings", height=10)
+        list_frame.pack(fill="y", expand=False, side="left")
+        self.trace_tree = ttk.Treeview(list_frame, columns=("label", "range"),
+                                       show="headings", height=10)
         self.trace_tree.heading("label", text="라벨")
         self.trace_tree.heading("range", text="Range I")
-        self.trace_tree.pack(fill="both", expand=True, side="left")
+        self.trace_tree.column("label", width=90)
+        self.trace_tree.column("range", width=70)
+        self.trace_tree.pack(fill="y", expand=False, side="left")
         btn_col = ttk.Frame(list_frame)
         btn_col.pack(side="left", padx=8, fill="y")
         ttk.Label(btn_col, text="실제 4200은 실행/Append만 되고\n시트 이름 지정·중간 삭제가 안 되지만,\n"
@@ -1501,9 +1598,11 @@ class App(tk.Tk):
         self.filename_lbl.pack(pady=(2, 8), anchor="w")
         self.sample_name_var.trace_add("write", lambda *_: self._refresh_trace_list())
 
-        plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일)", padding=4)
+        plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일, 8:10 비율)", padding=4)
         plot_frame.pack(fill="both", expand=True, side="left", padx=(8, 0))
-        self.plot_canvas = tk.Canvas(plot_frame, width=480, height=340, background="white",
+        # 기본 크기도 8:10(가로:세로)으로 맞춘다. 창을 늘려도 비율이 깨지지
+        # 않도록 실제 작도 영역은 _redraw_plot에서 다시 8:10으로 맞춘다.
+        self.plot_canvas = tk.Canvas(plot_frame, width=400, height=500, background="white",
                                      highlightthickness=1, highlightbackground="#ccc")
         self.plot_canvas.pack(fill="both", expand=True)
         self.plot_canvas.bind("<Configure>", lambda e: self._redraw_plot())
@@ -1900,21 +1999,33 @@ class App(tk.Tk):
         # 탭이 아직 한 번도 화면에 그려진 적 없으면 winfo_width/height가 실제
         # 크기 대신 1을 돌려주는 tkinter 특유의 함정이 있다 — 그럴 땐 생성 시
         # 지정한 크기로 대체한다.
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w <= 1:
-            w = int(c.cget("width"))
-        if h <= 1:
-            h = int(c.cget("height"))
+        cw = c.winfo_width()
+        ch_ = c.winfo_height()
+        if cw <= 1:
+            cw = int(c.cget("width"))
+        if ch_ <= 1:
+            ch_ = int(c.cget("height"))
+
+        # 창을 어떻게 늘리든 작도 영역은 항상 8:10(가로:세로)을 유지한다.
+        # 남는 쪽은 여백으로 두고(레터박스) 그림을 가운데 정렬 —— 이렇게 해야
+        # 화면 크기에 따라 그래프가 찌그러지지 않는다.
+        box_w, box_h = ASPECT_W, ASPECT_H
+        scale = min(cw / box_w, ch_ / box_h)
+        w = max(int(box_w * scale), 10)
+        h = max(int(box_h * scale), 10)
+        off_x = (cw - w) // 2
+        off_y = (ch_ - h) // 2
+        # 이하 좌표는 전부 (0,0)~(w,h) 기준으로 계산하고, 함수 끝에서 한 번에
+        # off_x/off_y 만큼 밀어 가운데 정렬한다.
         if not self.session or not self.session.traces:
-            c.create_text(w // 2, h // 2, text="측정된 트레이스 없음", fill="gray")
+            c.create_text(cw // 2, ch_ // 2, text="측정된 트레이스 없음", fill="gray")
             return
 
         traces = self.session.traces
         all_v = [v for t in traces for v, i, *_ in t["data"]]
         if not all_v:
-            c.create_text(w // 2, h // 2, text="표시할 데이터 포인트가 없습니다\n"
-                                               "(장비 미연결/Dry-run이면 정상)",
+            c.create_text(cw // 2, ch_ // 2, text="표시할 데이터 포인트가 없습니다\n"
+                                                  "(장비 미연결/Dry-run이면 정상)",
                           fill="gray", justify="center")
             return
 
@@ -1971,6 +2082,10 @@ class App(tk.Tk):
                          fill=color, width=2)
             c.create_text(w - margin_r - 24, legend_y + 5, text=t["label"], anchor="w", font=("", 7))
             legend_y += 13
+
+        # 8:10 박스를 캔버스 가운데로 이동 (레터박스)
+        if off_x or off_y:
+            c.move("all", off_x, off_y)
 
     # ---------- 실제 측정 로직 (워커 스레드에서 실행) ----------
     def _prep_and_apply(self, chans, ms):
