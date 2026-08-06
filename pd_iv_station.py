@@ -25,7 +25,7 @@ import queue
 import time
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # ==========================================================
 # 상수
@@ -93,7 +93,8 @@ IT_OPTS = ["1:Short(KITE Fast)", "2:Medium(KITE Normal)",
 SWEEP_OPTS = ["1:Linear", "2:Log10", "3:Log25", "4:Log50"]
 
 # 그래프 작도 영역 비율 (가로:세로). 창 크기와 무관하게 이 비율을 유지한다.
-ASPECT_W, ASPECT_H = 8, 10
+# 가로가 긴 형태 — 분석 앱 pd_app의 기본 페이지(10 x 8 in)와도 같은 방향.
+ASPECT_W, ASPECT_H = 10, 8
 
 _NUM = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 # KXCI list-mode 응답 토큰은 "N-1.00000E+00"처럼 앞에 한 글자 상태 코드가
@@ -974,6 +975,8 @@ class App(tk.Tk):
         self._live_wl = None     # 현재 실제로 출력 중인 파장(파장 전환 시 이전 채널 소등용)
         self._live_applying = False   # 스냅용 set()의 재진입 방지
         self._live_error = None       # 마지막 적용 실패 사유(예외 대신 여기 담음)
+        self._busy_widgets = []       # 측정 중 잠글 위젯들
+        self._live_partial = None     # 측정 중 실시간으로 그릴 부분 데이터
 
         self._build()
         self._on_dry_run_change()
@@ -1006,11 +1009,35 @@ class App(tk.Tk):
             pass
         self._drain_after_id = self.after(150, self._drain_queue)
 
-    def _run_worker(self, fn, *args):
+    def _register_busy_widget(self, w):
+        """측정 중 잠글 위젯 등록. 측정과 무관한 것(로그창, 그래프, 폴더 열기)은
+        등록하지 않아 측정 중에도 계속 볼 수 있게 한다."""
+        self._busy_widgets.append(w)
+        return w
+
+    def _set_busy_ui(self, busy, what=""):
+        """측정 중임을 화면에 표시하고 조작 버튼을 잠근다."""
+        for w in self._busy_widgets:
+            try:
+                w.state(["disabled"] if busy else ["!disabled"])
+            except Exception:  # noqa: BLE001 — 파괴된 위젯 등
+                pass
+        if busy:
+            self.busy_lbl.config(text=f"● 측정 중… {what}".rstrip(),
+                                 background="#fff3cd", foreground="#7a5b00")
+        else:
+            # 빈 문자열은 tk가 색 이름으로 해석해 오류를 낸다 — 생성 시점의
+            # 기본 배경색을 기억해뒀다가 그 값으로 되돌린다.
+            self.busy_lbl.config(text="○ 대기", background=self._busy_lbl_bg,
+                                 foreground="#666")
+
+    def _run_worker(self, fn, *args, what=""):
         if self.busy:
             messagebox.showwarning("측정 중", "이전 측정이 아직 끝나지 않았습니다.")
             return
         self.busy = True
+        self._busy_what = what
+        self._set_busy_ui(True, what)
 
         def _wrap():
             try:
@@ -1019,6 +1046,8 @@ class App(tk.Tk):
                 self.log(f"✘ 오류: {e}")
             finally:
                 self.busy = False
+                # UI 조작은 반드시 메인 스레드에서
+                self.after(0, lambda: self._set_busy_ui(False))
 
         threading.Thread(target=_wrap, daemon=True).start()
 
@@ -1213,8 +1242,9 @@ class App(tk.Tk):
         btns = ttk.Frame(frame)
         btns.grid(row=len(chans) + 1, column=0, columnspan=8, pady=10, sticky="w")
         ttk.Button(btns, text="설정 저장", command=self.save_smu_config).pack(side="left", padx=4)
-        ttk.Button(btns, text="4200에 적용(DE 전송)", command=self.apply_smu_config
-                  ).pack(side="left", padx=4)
+        self._register_busy_widget(ttk.Button(btns, text="4200에 적용(DE 전송)",
+                                              command=self.apply_smu_config)
+        ).pack(side="left", padx=4)
         ttk.Label(frame, text="Common(3)을 고르면 소스함수는 자동으로 Constant(3)로 고정됩니다.",
                   foreground="gray").grid(row=len(chans) + 2, column=0, columnspan=8, sticky="w")
 
@@ -1485,19 +1515,27 @@ class App(tk.Tk):
         ttk.Label(top, text="샘플명").grid(row=0, column=0, sticky="w")
         self.sample_name_var = tk.StringVar(value=self.station_cfg["sample_name"])
         ttk.Entry(top, textvariable=self.sample_name_var, width=20).grid(row=0, column=1, padx=4)
-        ttk.Button(top, text="새 세션 시작", command=self.start_session).grid(row=0, column=2, padx=6)
+        self._register_busy_widget(ttk.Button(top, text="새 세션 시작", command=self.start_session)
+        ).grid(row=0, column=2, padx=6)
         self.session_lbl = ttk.Label(top, text="세션: (없음)")
         self.session_lbl.grid(row=0, column=3, padx=10)
 
         # Dark 버튼은 별도 LabelFrame 없이 세션 줄에 붙인다 — 세로 공간을 아껴
         # 그래프에 넘겨주기 위함(예전엔 이 프레임 하나가 60px 가까이 먹었다).
         ttk.Separator(top, orient="vertical").grid(row=0, column=4, sticky="ns", padx=10)
-        ttk.Button(top, text="Dark 0→−1V 측정",
-                  command=lambda: self._run_worker(self._measure_dark, "neg")
-                  ).grid(row=0, column=5, padx=3)
-        ttk.Button(top, text="Dark 0→+1V 측정",
-                  command=lambda: self._run_worker(self._measure_dark, "pos")
-                  ).grid(row=0, column=6, padx=3)
+        self._register_busy_widget(ttk.Button(
+            top, text="Dark 0→−1V 측정",
+            command=lambda: self._run_worker(self._measure_dark, "neg", what="Dark 0→−1V"))
+        ).grid(row=0, column=5, padx=3)
+        self._register_busy_widget(ttk.Button(
+            top, text="Dark 0→+1V 측정",
+            command=lambda: self._run_worker(self._measure_dark, "pos", what="Dark 0→+1V"))
+        ).grid(row=0, column=6, padx=3)
+        # 지금 측정 중인지 항상 보이게 (측정 중에는 조작 버튼이 잠긴다)
+        self.busy_lbl = tk.Label(top, text="○ 대기", width=34, anchor="w",
+                                 font=("", 9, "bold"), fg="#666")
+        self.busy_lbl.grid(row=0, column=7, padx=(14, 0))
+        self._busy_lbl_bg = self.busy_lbl.cget("background")
 
         light_frame = ttk.LabelFrame(frame, text="광전류 (−1→+1V, 한번에)", padding=8)
         light_frame.pack(fill="x", pady=(6, 4))
@@ -1515,9 +1553,10 @@ class App(tk.Tk):
         self.pct_combo = ttk.Combobox(light_frame, textvariable=self.preset_pct_var,
                                       width=14, state="readonly")
         self.pct_combo.grid(row=0, column=5, padx=4, pady=2)
-        ttk.Button(light_frame, text="선택 광원 I-V 측정",
-                  command=lambda: self._run_worker(self._measure_photo)
-                  ).grid(row=0, column=6, padx=(16, 0), pady=2)
+        self._register_busy_widget(ttk.Button(
+            light_frame, text="선택 광원 I-V 측정",
+            command=lambda: self._run_worker(self._measure_photo, what="광전류 I-V"))
+        ).grid(row=0, column=6, padx=(16, 0), pady=2)
 
         # ---- 실시간 세기 조절 (파워미터 보면서 맞추고 그대로 프리셋 저장) ----
         live = ttk.LabelFrame(light_frame, text="실시간 세기 조절", padding=6)
@@ -1573,22 +1612,34 @@ class App(tk.Tk):
         # 모자라면 조용히 잘려 "내보내기 버튼이 없다"고 보였다.
         export_bar = ttk.LabelFrame(frame, text="내보내기", padding=8)
         export_bar.pack(fill="x", side="bottom", pady=(6, 0))
-        ttk.Button(export_bar, text="엑셀 내보내기", command=self.export_excel
-                  ).pack(side="left", padx=(0, 12))
-        self.bracket_lbl = ttk.Label(export_bar, text="브래킷: ", font=("", 9, "bold"))
+
+        row1 = ttk.Frame(export_bar)
+        row1.pack(fill="x")
+        self._register_busy_widget(ttk.Button(row1, text="엑셀 내보내기",
+                                              command=self.export_excel)
+        ).pack(side="left", padx=(0, 12))
+        self.bracket_lbl = ttk.Label(row1, text="브래킷: ", font=("", 9, "bold"))
         self.bracket_lbl.pack(side="left", padx=(0, 16))
+
+        row2 = ttk.Frame(export_bar)
+        row2.pack(fill="x", pady=(4, 0))
+        ttk.Label(row2, text="저장 폴더:").pack(side="left")
+        # 저장 위치는 station_config.json에 남아서 다음 실행 때도 유지된다.
+        self.export_dir_var = tk.StringVar(
+            value=self.station_cfg.get("export_dir") or os.path.abspath("."))
+        ttk.Entry(row2, textvariable=self.export_dir_var, width=62).pack(side="left", padx=4)
+        ttk.Button(row2, text="폴더 선택...", command=self.choose_export_dir).pack(side="left", padx=2)
+        ttk.Button(row2, text="폴더 열기", command=self.open_export_dir).pack(side="left", padx=2)
         self.filename_lbl = ttk.Label(export_bar, text="내보낼 파일명: (없음)", foreground="#555")
         self.filename_lbl.pack(side="left")
         self.sample_name_var.trace_add("write", lambda *_: self._refresh_trace_list())
 
-        mid = ttk.Frame(frame)
+        # 목록 : 그래프 폭 배분을 사용자가 직접 조절할 수 있게 가로 PanedWindow로
+        # 묶는다(로그창과 같은 방식 — 가운데 구분선을 좌우로 드래그).
+        mid = ttk.PanedWindow(frame, orient="horizontal")
         mid.pack(fill="both", expand=True, pady=8)
 
-        # 8:10(세로가 긴) 그래프는 '세로'가 병목이라, 폭을 아무리 줘도 작도
-        # 영역이 커지지 않고 좌우 여백만 늘어난다. 그래서 남는 폭은 그래프가
-        # 아니라 **트레이스 목록**에 준다(라벨/파일명이 잘리지 않게).
-        list_frame = ttk.LabelFrame(mid, text="측정된 트레이스", padding=8)
-        list_frame.pack(fill="both", expand=True, side="left")
+        list_frame = ttk.LabelFrame(mid, text="측정된 트레이스 (가운데 선을 드래그해 폭 조절)", padding=8)
         self.trace_tree = ttk.Treeview(list_frame, columns=("label", "range"),
                                        show="headings", height=8)
         self.trace_tree.heading("label", text="라벨")
@@ -1598,22 +1649,29 @@ class App(tk.Tk):
         self.trace_tree.pack(fill="both", expand=True, side="left")
         btn_col = ttk.Frame(list_frame)
         btn_col.pack(side="left", padx=8, fill="y")
-        ttk.Button(btn_col, text="선택 삭제", command=self.delete_selected_trace).pack(pady=2, fill="x")
-        ttk.Button(btn_col, text="라벨 수정", command=self.edit_selected_label).pack(pady=2, fill="x")
-        ttk.Button(btn_col, text="위로 ▲", command=lambda: self.move_selected(-1)).pack(pady=2, fill="x")
-        ttk.Button(btn_col, text="아래로 ▼", command=lambda: self.move_selected(1)).pack(pady=2, fill="x")
+        self._register_busy_widget(ttk.Button(btn_col, text="선택 삭제",
+            command=self.delete_selected_trace)).pack(pady=2, fill="x")
+        self._register_busy_widget(ttk.Button(btn_col, text="라벨 수정",
+            command=self.edit_selected_label)).pack(pady=2, fill="x")
+        self._register_busy_widget(ttk.Button(btn_col, text="위로 ▲",
+            command=lambda: self.move_selected(-1))).pack(pady=2, fill="x")
+        self._register_busy_widget(ttk.Button(btn_col, text="아래로 ▼",
+            command=lambda: self.move_selected(1))).pack(pady=2, fill="x")
         ttk.Label(btn_col, text="중간 삭제·순서 변경\n모두 가능", foreground="gray",
                  justify="left").pack(pady=(8, 0), anchor="w")
 
-        # 그래프는 세로로만 늘어나면 되므로 폭은 고정(expand=False)한다.
-        plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일, 8:10 비율)", padding=4)
-        plot_frame.pack(fill="y", expand=False, side="right", padx=(8, 0))
-        # 기본 크기도 8:10(가로:세로)으로 맞춘다. 창을 늘려도 비율이 깨지지
-        # 않도록 실제 작도 영역은 _redraw_plot에서 다시 8:10으로 맞춘다.
-        self.plot_canvas = tk.Canvas(plot_frame, width=440, height=550, background="white",
+        plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일, 10:8 비율)", padding=4)
+        # 기본 크기도 10:8(가로가 긴 형태)로 맞춘다. 창을 늘리거나 구분선을
+        # 옮겨도 실제 작도 영역은 _redraw_plot에서 다시 10:8로 맞춘다.
+        self.plot_canvas = tk.Canvas(plot_frame, width=560, height=448, background="white",
                                      highlightthickness=1, highlightbackground="#ccc")
-        self.plot_canvas.pack(fill="y", expand=True)
+        self.plot_canvas.pack(fill="both", expand=True)
         self.plot_canvas.bind("<Configure>", lambda e: self._redraw_plot())
+
+        # 그래프 쪽에 가중치를 더 줘서 창을 키우면 그래프가 주로 커지게 한다.
+        # (사용자가 구분선을 드래그하면 그 위치가 우선)
+        mid.add(list_frame, weight=1)
+        mid.add(plot_frame, weight=3)
 
     def _wl_key(self):
         """콤보박스에는 '8: 940 nm'처럼 브래킷 코드 번호를 붙여 보여주지만,
@@ -1980,6 +2038,26 @@ class App(tk.Tk):
             children = self.trace_tree.get_children()
             self.trace_tree.selection_set(children[idx + delta])
 
+    def choose_export_dir(self):
+        cur = self.export_dir_var.get().strip()
+        d = filedialog.askdirectory(
+            parent=self, title="엑셀을 저장할 폴더 선택",
+            initialdir=cur if os.path.isdir(cur) else os.path.abspath("."))
+        if not d:
+            return
+        d = os.path.normpath(d)
+        self.export_dir_var.set(d)
+        self.station_cfg["export_dir"] = d
+        save_json(STATION_CONFIG_FILE, self.station_cfg)
+        self.log(f"[내보내기] 저장 폴더 지정: {d}")
+
+    def open_export_dir(self):
+        d = self.export_dir_var.get().strip()
+        if not os.path.isdir(d):
+            messagebox.showerror("폴더 없음", f"존재하지 않는 폴더입니다:\n{d}")
+            return
+        os.startfile(d)   # Windows 전용 — 이 프로그램 자체가 Windows 전용이라 무방
+
     def export_excel(self):
         if not self.session:
             messagebox.showwarning("세션 없음", "먼저 세션을 시작하세요.")
@@ -1987,8 +2065,14 @@ class App(tk.Tk):
         # 세션 폴더 이름은 시작할 때 고정되지만, 엑셀 파일명에 들어갈 샘플명은
         # 내보내기 직전까지 위 입력란에서 자유롭게 바꿀 수 있다.
         name = self.sample_name_var.get().strip() or self.session.sample_name
+        out_dir = self.export_dir_var.get().strip() or os.path.abspath(".")
+        if not os.path.isdir(out_dir):
+            messagebox.showerror("폴더 없음",
+                                 f"저장 폴더가 존재하지 않습니다:\n{out_dir}\n\n"
+                                 "'폴더 선택...'으로 다시 지정하세요.")
+            return
         try:
-            path = self.session.export_excel(".", sample_name=name)
+            path = self.session.export_excel(out_dir, sample_name=name)
             self.log(f"[내보내기] 저장됨: {path}")
             messagebox.showinfo("완료", f"저장됨:\n{path}")
         except ImportError:
@@ -2021,12 +2105,8 @@ class App(tk.Tk):
         scale = min(cw / box_w, ch_ / box_h)
         w = max(int(box_w * scale), 10)
         h = max(int(box_h * scale), 10)
-        # 캔버스 폭을 세로에 맞춰 따라가게 해서 좌우 여백을 없앤다.
-        # (세로가 병목이므로 폭이 남으면 그냥 빈 공간이 된다)
-        want_w = int(h * ASPECT_W / ASPECT_H) + 2 * 4
-        if abs(int(c.cget("width")) - want_w) > 8:
-            c.config(width=want_w)
-
+        # 폭은 사용자가 구분선(sash)으로 직접 정하므로 코드가 캔버스 크기를
+        # 건드리지 않는다 — 건드리면 드래그한 위치와 계속 싸우게 된다.
         off_x = (cw - w) // 2
         off_y = (ch_ - h) // 2
         # 이하 좌표는 전부 (0,0)~(w,h) 기준으로 계산하고, 함수 끝에서 한 번에
@@ -2128,7 +2208,12 @@ class App(tk.Tk):
         expected = int(round(abs(stop - start) / abs(step))) + 1 if step else 0
         t_trig = time.time()
         self.smu.trigger()
-        self.smu.wait_done()
+        # 스윕이 도는 동안 경과 시간을 계속 표시한다. KXCI 리스트 모드는 측정이
+        # 끝나야(Data Ready) DO로 데이터를 주기 때문에, 점이 찍히는 걸 실시간으로
+        # 보여줄 수는 없다 — 대신 '얼마나 진행됐는지'를 숫자로 보여준다.
+        base = getattr(self, "_busy_what", "")
+        self.smu.wait_done(on_tick=lambda el: self.after(
+            0, self._set_busy_ui, True, f"{base}  {el:4.1f}s / 예상 {expected}점"))
         elapsed = time.time() - t_trig
         v_pairs = self.smu.fetch_with_status(sweep_ch["vname"])
         i_pairs = self.smu.fetch_with_status(sweep_ch["iname"])
@@ -2289,8 +2374,10 @@ class App(tk.Tk):
         self.it_light_s_var = tk.DoubleVar(value=itc.get("light_s", 5.0))
         ttk.Entry(top, textvariable=self.it_light_s_var, width=8).grid(row=1, column=5, pady=(6, 0))
 
-        ttk.Button(frame, text="I-T 측정 시작",
-                  command=lambda: self._run_worker(self._measure_it)).pack(anchor="w", pady=12)
+        self._register_busy_widget(ttk.Button(
+            frame, text="I-T 측정 시작",
+            command=lambda: self._run_worker(self._measure_it, what="I-T"))
+        ).pack(anchor="w", pady=12)
         ttk.Label(frame, text="시퀀스: dark → (가장 약한 세기) → dark → ... → (가장 강한 세기) → dark(끝). "
                               "세기는 탭3/BioLED Controller에 등록된 프리셋을 낮은 것부터 순서대로 사용. "
                               "Range I는 이 파장의 프리셋 세트 전체(dark 포함)에 고정.",
@@ -2354,7 +2441,8 @@ class App(tk.Tk):
         t0 = time.time()
         events = []
         elapsed_target = 0.0
-        for level, seg_label, dur in timeline:
+        n_seg = len(timeline)
+        for k, (level, seg_label, dur) in enumerate(timeline, 1):
             if level is None:
                 self.led.off(ch_info["channel"])
             else:
@@ -2362,8 +2450,12 @@ class App(tk.Tk):
             events.append((round(time.time() - t0, 3), seg_label))
             elapsed_target += dur
             edge = t0 + elapsed_target
+            # I-T는 구간 진행이 눈에 보이는 측정이라 남은 시간까지 표시한다
             while time.time() < edge:
-                time.sleep(0.01)
+                self.after(0, self._set_busy_ui, True,
+                          f"I-T  {k}/{n_seg}구간 [{seg_label}]  "
+                          f"{time.time()-t0:.0f}/{total_s:.0f}s")
+                time.sleep(0.2 if edge - time.time() > 0.2 else 0.01)
         self.led.off(ch_info["channel"])
 
         self.smu.wait_done()
