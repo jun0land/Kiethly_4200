@@ -359,16 +359,31 @@ class Keithley4200:
         self._w_checked(f"VC{ch},{value:g},{compliance_A:g}")
 
     # ---------- SM 페이지: 측정 설정 ----------
-    def setup_measure_iv(self):
+    def _send_li(self, names):
+        """LI = 리스트 모드에서 **측정할 함수**를 지정한다 (매뉴얼 5.4절).
+
+        ⚠ 이걸 안 보내면 스윕 변수(전압)는 돌려주지만 **전류가 측정 대상으로
+        등록되지 않아 전부 0.00000E+00으로 돌아온다.** 실기에서 정확히 이
+        증상이 나왔다(V는 201점 정상, I는 201개 전부 정확히 0). 측정 자체도
+        전류를 적분하지 않으니 예상보다 빨리 끝난다.
+        이름은 DE 페이지에서 붙인 것을 그대로 써야 하고 최대 6개."""
+        names = [n for n in (names or []) if n]
+        if not names:
+            return
+        self._w_checked("LI " + ",".join(f"'{n}'" for n in names[:6]))
+
+    def setup_measure_iv(self, measure_names=None):
         self._w("SM")
         self._w_checked("DM2")  # 리스트 데이터 모드
+        self._send_li(measure_names)
 
-    def setup_measure_it(self, wait_s, interval_s, n_reads):
+    def setup_measure_it(self, wait_s, interval_s, n_reads, measure_names=None):
         self._w("SM")
         self._w_checked(f"WT {wait_s:g}")
         self._w_checked(f"IN {interval_s:g}")
         self._w_checked(f"NR {n_reads}")
         self._w_checked("DM2")
+        self._send_li(measure_names)
 
     # ---------- 전역 설정 ----------
     def set_integration(self, mode, custom=None):
@@ -1947,7 +1962,9 @@ class App(tk.Tk):
             self.smu.ir_sweep(sweep_ch["ch"], start, stop, step, compliance, ms["sweep_type"])
         else:
             self.smu.vr_sweep(sweep_ch["ch"], start, stop, step, compliance, ms["sweep_type"])
-        self.smu.setup_measure_iv()
+        # 스윕 채널의 전압·전류 이름을 측정 대상으로 명시 (LI) — 없으면 전류가
+        # 측정되지 않아 전부 0으로 돌아온다
+        self.smu.setup_measure_iv([sweep_ch["vname"], sweep_ch["iname"]])
         if range_A is not None and ms["range_mode"] in ("RI", "RG"):
             if ms["range_mode"] == "RI":
                 self.smu.set_range_fixed(sweep_ch["ch"], range_A, compliance)
@@ -1970,6 +1987,14 @@ class App(tk.Tk):
             self.log(f"    ⚠ 수신 점수({n})가 설정값에서 계산한 점수({expected})와 다릅니다 "
                     "— 스윕이 끝나기 전에 읽었을 가능성")
         data = [(v_pairs[k][0], i_pairs[k][0], i_pairs[k][1]) for k in range(n)]
+        # 전류가 '정확히' 전부 0이면 물리적 측정 결과로 보기 어렵다. 실제
+        # 개방회로라도 미세한 누설/노이즈가 섞여 완전한 0이 되긴 힘들다.
+        if n and all(i == 0.0 for _, i, _ in data):
+            self.log(f"    ⚠ 전류 {n}점이 전부 정확히 0입니다 — 측정이 실제로 일어나지 "
+                    "않았을 가능성이 큽니다. 확인 순서:\n"
+                    "       ① 소자가 실제로 프로브에 물려 있는지\n"
+                    "       ② 탭1 SMU 배정이 실제 배선과 맞는지 (스윕=Anode쪽, Common=Cathode쪽)\n"
+                    "       ③ 4200 SMU 출력 케이블 / Interlock 상태")
         # 'N'(Normal) 이외의 상태 코드는 컴플라이언스/오버플로 가능성을 뜻한다
         # (정확한 코드 의미는 매뉴얼 상태 문자 표로 재확인할 것).
         flagged = sum(1 for _, _, s in data if s and s != "N")
@@ -2166,7 +2191,7 @@ class App(tk.Tk):
         self.smu.setup_sources(chans)
         self.smu.vc_constant(ch["ch"], bias, compliance)
         n = int((total_s + 1.0) / interval_s) + 1
-        self.smu.setup_measure_it(0.0, interval_s, n)
+        self.smu.setup_measure_it(0.0, interval_s, n, [ch["vname"], ch["iname"]])
         if fixed_range is not None:
             self.smu.set_range_fixed(ch["ch"], fixed_range, compliance)
         self.smu.trigger()
@@ -2207,7 +2232,7 @@ class App(tk.Tk):
         self.smu.setup_sources(chans)
         self.smu.vc_constant(ch["ch"], bias, compliance)
         n = int(total_s / interval_s) + 1
-        self.smu.setup_measure_it(0.0, interval_s, n)
+        self.smu.setup_measure_it(0.0, interval_s, n, [ch["vname"], ch["iname"]])
         if fixed_range is not None:
             self.smu.set_range_fixed(ch["ch"], fixed_range, compliance)
         self.smu.trigger()
