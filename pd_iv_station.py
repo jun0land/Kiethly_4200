@@ -758,11 +758,24 @@ HELP_TEXT = """\
       사람이 손으로 끼우는 것이라 프로그램이 알 수 없지만, 같은 %라도 OD가
       다르면 실제 광량이 다르므로 "이 파장 · 이 OD"로 묶어서 등록해야
       나중에 헷갈리지 않는다. 새 OD 값(예: OD2)은 그 칸에 직접 입력하고
-      "+ 프리셋 추가"를 누르면 새로 생긴다.
-    - "세기 프리셋" 옆 "+ 프리셋 추가"로 이 프로그램 안에서 바로 세기(%)를
-      등록할 수 있다(cli_tools\\bioled_controller.py와 같은 파일을 공유하므로
-      거기서 등록한 것도 그대로 보인다 — 그쪽도 OD별로 나뉘어 있다). 파장·OD를
-      바꾸면 그 조합에 등록된 프리셋만 자동으로 드롭다운에 나타난다.
+      "+ 현재 세기를 프리셋으로"를 누르면 새로 생긴다.
+
+    - ★ "실시간 세기 조절" — BioLED 전용 소프트웨어를 따로 띄울 필요 없이
+      여기서 바로 광량을 맞춘다. 사용 순서:
+        ① 파장·OD 선택 → ② "켜기" → ③ 슬라이더를 드래그하거나 숫자칸을
+        클릭하고 ↑/↓ 키로 0.1 %씩 미세조정 (BioLED에 즉시 반영됨)
+        → ④ 파워미터가 원하는 값(예: 1 mW)을 가리키면
+        → ⑤ "+ 현재 세기를 프리셋으로" 클릭 → 이름만 입력(예: `1 mW`)
+      **세기를 다시 타이핑할 필요가 없다** — 지금 슬라이더에 있는 값이 그대로
+      저장된다. 이름 입력창은 **커서가 자동으로 들어가 있어** 바로 타이핑하면
+      되고, Enter로 확인 / Esc로 취소된다.
+      · 켠 상태에서 파장을 바꾸면 이전 파장은 자동으로 꺼진다(광원 하나만 켜짐).
+      · 측정을 실행하면 측정 쪽이 광원을 제어하고 끝나면 꺼지므로, 실시간
+        조절도 자동으로 해제된다.
+    - 프리셋은 cli_tools\\bioled_controller.py와 같은 파일을 공유하므로 거기서
+      등록한 것도 그대로 보인다(그쪽도 OD별로 나뉘어 있다). 파장·OD를 바꾸면
+      그 조합에 등록된 프리셋만 자동으로 드롭다운에 나타난다.
+    - "프리셋 수정" / "프리셋 삭제"는 드롭다운에서 프리셋을 고른 뒤 누른다.
     - Dark 0→−1V / Dark 0→+1V / 선택 광원 I-V 버튼으로 한 트레이스씩 쌓는다.
     - 오른쪽 그래프에 측정된 트레이스가 |전류| 로그스케일로 즉시 겹쳐 그려진다
       (KITE 화면처럼 누적해서 볼 수 있다). 전류가 정확히 0으로 읽히면 그래프
@@ -843,6 +856,11 @@ class App(tk.Tk):
         self.dry_run.trace_add("write", lambda *_: self._on_dry_run_change())
         self.q = queue.Queue()   # 워커 스레드 -> UI 로그
         self.busy = False
+        # 실시간 광원 세기 조절 상태 (슬라이더 드래그는 이벤트가 초당 수십 번
+        # 발생하므로 debounce 후 마지막 값만 장치로 보낸다)
+        self._live_after_id = None
+        self._live_is_on = False
+        self._live_wl = None     # 현재 실제로 출력 중인 파장(파장 전환 시 이전 채널 소등용)
 
         self._build()
         self._on_dry_run_change()
@@ -973,8 +991,16 @@ class App(tk.Tk):
             self.smu = None
             self.conn_status.config(text="● 미연결", foreground="gray")
         if self.led:
+            # 해제 전에 실시간 출력부터 끈다 — 광원이 켜진 채 연결만 끊기면
+            # 프로그램에서 더 이상 끌 방법이 없어진다.
+            try:
+                self.live_off()
+            except Exception:  # noqa: BLE001
+                pass
             self.led.close()
             self.led = None
+        self._live_is_on = False
+        self._live_wl = None
 
     # ======================================================
     # 탭 0 · 사용법
@@ -1212,7 +1238,7 @@ class App(tk.Tk):
         self.log(f"[프리셋] '{name}' 저장됨")
 
     def save_preset_as(self):
-        name = simpledialog.askstring("프리셋 저장", "새 프리셋 이름:", parent=self)
+        name = self._ask_focused("프리셋 저장", "새 프리셋 이름:")
         if not name:
             return
         self.presets_cfg["presets"][name] = self._collect_measure_settings()
@@ -1285,14 +1311,44 @@ class App(tk.Tk):
                   command=lambda: self._run_worker(self._measure_photo)
                   ).grid(row=0, column=6, padx=(16, 0), pady=2)
 
-        preset_btns = ttk.Frame(light_frame)
-        preset_btns.grid(row=1, column=0, columnspan=6, sticky="w", pady=(4, 0))
-        ttk.Button(preset_btns, text="+ 프리셋 추가", command=self.add_led_preset
-                  ).pack(side="left", padx=(0, 4))
-        ttk.Button(preset_btns, text="프리셋 수정", command=self.edit_led_preset
-                  ).pack(side="left", padx=4)
-        ttk.Button(preset_btns, text="프리셋 삭제", command=self.delete_led_preset
-                  ).pack(side="left", padx=4)
+        # ---- 실시간 세기 조절 (파워미터 보면서 맞추고 그대로 프리셋 저장) ----
+        live = ttk.LabelFrame(light_frame, text="실시간 세기 조절", padding=6)
+        live.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(6, 2))
+
+        self.live_pct_var = tk.DoubleVar(value=0.0)
+        self.live_scale = ttk.Scale(live, from_=0.0, to=100.0, orient="horizontal",
+                                    variable=self.live_pct_var, length=430,
+                                    command=lambda _v: self._on_live_scale())
+        self.live_scale.grid(row=0, column=0, padx=(0, 8), pady=2)
+
+        # Spinbox는 위/아래 화살표키가 기본 동작이라 미세조정에 유리.
+        # 슬라이더(드래그)와 같은 변수를 공유해 양쪽이 항상 동기화된다.
+        self.live_spin = ttk.Spinbox(live, from_=0.0, to=100.0, increment=0.1,
+                                     textvariable=self.live_pct_var, width=8,
+                                     format="%.1f", command=self._apply_live_percent)
+        self.live_spin.grid(row=0, column=1, pady=2)
+        ttk.Label(live, text="%").grid(row=0, column=2, padx=(2, 10))
+
+        self.live_on_btn = ttk.Button(live, text="켜기", width=6, command=self.live_on)
+        self.live_on_btn.grid(row=0, column=3, padx=2)
+        ttk.Button(live, text="끄기", width=6, command=self.live_off).grid(row=0, column=4, padx=2)
+
+        ttk.Button(live, text="+ 현재 세기를 프리셋으로", command=self.add_led_preset
+                  ).grid(row=0, column=5, padx=(14, 4))
+        ttk.Button(live, text="프리셋 수정", command=self.edit_led_preset
+                  ).grid(row=0, column=6, padx=4)
+        ttk.Button(live, text="프리셋 삭제", command=self.delete_led_preset
+                  ).grid(row=0, column=7, padx=4)
+
+        ttk.Label(live, foreground="gray", wraplength=1040, justify="left",
+                 text="슬라이더를 드래그하거나, 숫자칸을 클릭한 뒤 ↑/↓ 키로 0.1 %씩 미세조정하면 "
+                      "BioLED에 즉시 반영된다(연결돼 있을 때). 파워미터를 보며 원하는 광량(예: 1 mW)에 "
+                      "맞춘 뒤 '+ 현재 세기를 프리셋으로'를 누르면 그 값이 그대로 저장된다 — 세기를 다시 "
+                      "입력할 필요 없음."
+                 ).grid(row=1, column=0, columnspan=8, sticky="w", pady=(4, 0))
+
+        # (실시간 조절 상태 변수는 __init__에서 초기화 — _build 도중 실패해도
+        #  destroy -> disconnect_all 경로에서 AttributeError가 안 나도록)
 
         self.wl_var.trace_add("write", lambda *_: self._refresh_od_options())
         self.od_var.trace_add("write", lambda *_: self._refresh_led_presets())
@@ -1365,16 +1421,110 @@ class App(tk.Tk):
         else:
             self.preset_pct_var.set("")
 
+    # ---------- 실시간 세기 조절 ----------
+    def _on_live_scale(self):
+        """슬라이더 드래그 중 호출. 이벤트가 매우 잦으므로 debounce."""
+        if self._live_after_id:
+            self.after_cancel(self._live_after_id)
+        self._live_after_id = self.after(60, self._apply_live_percent)
+
+    def _apply_live_percent(self):
+        self._live_after_id = None
+        pct = round(float(self.live_pct_var.get()), 1)
+        # 슬라이더는 연속값이라 0.1 단위로 스냅해 표시/저장값을 깔끔하게 유지
+        if abs(pct - float(self.live_pct_var.get())) > 1e-9:
+            self.live_pct_var.set(pct)
+        if self.led is None or not self._live_is_on:
+            return  # 미연결이거나 '켜기' 전이면 값만 바꾸고 실제 출력은 안 건드림
+        wl = self._wl_key()
+        try:
+            # 켠 상태로 파장을 바꿨다면 이전 채널을 먼저 끈다
+            # (단일 광원 측정 가정 — 두 파장이 동시에 켜지면 안 됨)
+            if self._live_wl and self._live_wl != wl:
+                self.led.off(self.led_settings["channels"][self._live_wl]["channel"])
+                self.log(f"[LED] 파장 변경 — {PRETTY_LABEL[self._live_wl]} 끔")
+            ch_info = self.led_settings["channels"][wl]
+            self.led.set_percent(ch_info["channel"], pct)
+            self._live_wl = wl
+        except Exception as e:  # noqa: BLE001
+            self.log(f"✘ LED 세기 적용 실패: {e}")
+
+    def live_on(self):
+        if self.led is None:
+            messagebox.showwarning("미연결", "먼저 상단 'BioLED 연결'을 누르세요.")
+            return
+        self._live_is_on = True
+        self._apply_live_percent()
+        wl = self._wl_key()
+        self.log(f"[LED] {PRETTY_LABEL[wl]} 실시간 조절 켜짐 @ {self.live_pct_var.get():.1f}% "
+                "— 파워미터 보며 맞춘 뒤 '+ 현재 세기를 프리셋으로'")
+
+    def live_off(self):
+        self._live_is_on = False
+        if self.led is None:
+            self._live_wl = None
+            return
+        wl = self._live_wl or self._wl_key()
+        try:
+            self.led.off(self.led_settings["channels"][wl]["channel"])
+            self.log(f"[LED] {PRETTY_LABEL[wl]} 끔")
+        except Exception as e:  # noqa: BLE001
+            self.log(f"✘ LED 끄기 실패: {e}")
+        finally:
+            self._live_wl = None
+
+    def _ask_focused(self, title, prompt, initial=""):
+        """입력칸에 **자동으로 커서가 들어가 있는** 한 줄 입력창.
+        tkinter 기본 simpledialog는 포커스가 확실치 않아 매번 칸을 클릭해야
+        했다 — 그 불편을 없애려고 직접 만든다. Enter=확인, Esc=취소."""
+        top = tk.Toplevel(self)
+        top.title(title)
+        top.transient(self)
+        top.resizable(False, False)
+        ttk.Label(top, text=prompt, wraplength=380, justify="left").pack(
+            padx=14, pady=(14, 6), anchor="w")
+        var = tk.StringVar(value=initial)
+        ent = ttk.Entry(top, textvariable=var, width=34)
+        ent.pack(padx=14, pady=(0, 10))
+
+        result = {"value": None}
+
+        def ok(_e=None):
+            result["value"] = var.get().strip()
+            top.destroy()
+
+        def cancel(_e=None):
+            top.destroy()
+
+        btns = ttk.Frame(top)
+        btns.pack(padx=14, pady=(0, 12))
+        ttk.Button(btns, text="확인", command=ok).pack(side="left", padx=4)
+        ttk.Button(btns, text="취소", command=cancel).pack(side="left", padx=4)
+
+        ent.bind("<Return>", ok)
+        ent.bind("<Escape>", cancel)
+        top.bind("<Escape>", cancel)
+
+        # 창이 실제로 뜬 뒤에 포커스를 줘야 확실히 먹는다.
+        top.update_idletasks()
+        top.grab_set()
+        ent.focus_force()
+        ent.selection_range(0, "end")
+        ent.icursor("end")
+        top.wait_window()
+        return result["value"] or None
+
     def add_led_preset(self):
+        """현재 슬라이더 세기를 그대로 프리셋으로 저장한다.
+        파워미터를 보며 맞춘 값을 다시 타이핑할 필요가 없도록, 세기는 묻지 않고
+        **이름만** 물어본다(입력칸에 커서가 자동으로 들어가 있음)."""
         wl = self._wl_key()
         od = self.od_var.get().strip() or DEFAULT_OD
-        percent = simpledialog.askfloat(
-            "세기 프리셋 추가", f"{PRETTY_LABEL[wl]} · {od}에 등록할 세기(%) — BioLED 소프트웨어와 "
-            "같은 '채널 최대 대비 %' 값:", parent=self, minvalue=0.0, maxvalue=100.0)
-        if percent is None:
-            return
-        label = simpledialog.askstring(
-            "세기 프리셋 추가", "이 세기의 이름 (예: 1 mW):", parent=self)
+        percent = round(float(self.live_pct_var.get()), 1)
+        label = self._ask_focused(
+            "프리셋 추가",
+            f"{PRETTY_LABEL[wl]} · {od} · 현재 세기 {percent} %\n\n"
+            "이 세기의 이름을 입력하세요 (예: 1 mW):")
         if not label:
             return
         self.led_presets.setdefault(wl, {}).setdefault(od, []).append(
@@ -1396,13 +1546,22 @@ class App(tk.Tk):
             messagebox.showinfo("선택 없음", "수정할 프리셋을 먼저 드롭다운에서 선택하세요.")
             return
         cur = presets[idx]
-        percent = simpledialog.askfloat(
-            "프리셋 수정", f"{PRETTY_LABEL[wl]} · {od} · '{cur['label']}'의 새 세기(%):",
-            parent=self, minvalue=0.0, maxvalue=100.0, initialvalue=cur["percent"])
-        if percent is None:
+        pct_s = self._ask_focused(
+            "프리셋 수정",
+            f"{PRETTY_LABEL[wl]} · {od} · '{cur['label']}'의 새 세기(%):\n"
+            f"(현재 슬라이더 값을 쓰려면 {self.live_pct_var.get():.1f} 입력)",
+            initial=str(cur["percent"]))
+        if not pct_s:
             return
-        label = simpledialog.askstring(
-            "프리셋 수정", "새 이름:", parent=self, initialvalue=cur["label"])
+        try:
+            percent = round(float(pct_s), 1)
+        except ValueError:
+            messagebox.showerror("입력 오류", f"숫자가 아닙니다: {pct_s!r}")
+            return
+        if not (0.0 <= percent <= 100.0):
+            messagebox.showerror("입력 오류", "세기는 0~100 % 범위여야 합니다.")
+            return
+        label = self._ask_focused("프리셋 수정", "새 이름:", initial=cur["label"])
         if not label:
             return
         presets[idx] = {"label": label, "percent": percent}
@@ -1697,6 +1856,10 @@ class App(tk.Tk):
             if self.led is not None:
                 ch_info = self.led_settings["channels"][wl]
                 self.led.off(ch_info["channel"])
+                # 측정이 광원을 껐으므로 실시간 조절 상태도 실제와 맞춘다
+                # (UI만 '켜짐'으로 남아 있으면 사용자가 오해한다)
+                self._live_is_on = False
+                self._live_wl = None
 
         rec = self.session.add_trace(label, range_A, data)
         self.log(f"[측정] {label} 완료: {len(data)}점 -> {rec['csv_path']}")
