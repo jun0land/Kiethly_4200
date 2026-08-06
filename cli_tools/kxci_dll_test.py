@@ -45,7 +45,23 @@ def load_dll():
         raise SystemExit(f"\u2718 DLL을 찾을 수 없습니다: {DLL_PATH}\n"
                          "  KXCIclient.dll 을 이 스크립트와 같은 폴더에 두세요.")
 
-    dll = ctypes.CDLL(DLL_PATH)   # _C 함수들은 cdecl -> CDLL (WinDLL 아님)
+    try:
+        dll = ctypes.CDLL(DLL_PATH)   # _C 함수들은 cdecl -> CDLL (WinDLL 아님)
+    except OSError as e:
+        # 파일은 있는데 로드 실패 = 십중팔구 의존 DLL 누락.
+        # KXCIclient.dll은 MSVCR120.dll(VC++ 2013 x86)을 필요로 하는데
+        # Windows 기본 설치에는 없다. 이때 파이썬 메시지가
+        # "Could not find module ... (or one of its dependencies)" 라서
+        # 마치 경로 문제처럼 보이지만, 경로가 맞아도 나는 오류다.
+        raise SystemExit(
+            f"✘ DLL 파일은 찾았지만 로드에 실패했습니다.\n"
+            f"  경로: {DLL_PATH}\n"
+            f"  원본 오류: {e}\n\n"
+            "→ 파일이 있는데 이 오류가 나면 대부분 **의존 DLL 누락**입니다.\n"
+            "   Visual C++ 2013 재배포 패키지(x86)를 설치하세요:\n"
+            "   https://www.microsoft.com/en-us/download/details.aspx?id=40784\n"
+            "   반드시 vcredist_x86.exe (64비트 OS에서도 x86!) 를 받으세요."
+        ) from e
 
     dll.OpenKXCIConnection_C.argtypes = [ctypes.c_char_p, ctypes.c_int,
                                         ctypes.POINTER(ctypes.c_int)]

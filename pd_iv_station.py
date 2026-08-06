@@ -106,13 +106,72 @@ def format_range_i(range_A):
 
 
 def _check_bitness():
+    """⚠ 반드시 RuntimeError(=Exception 하위)를 던질 것.
+    예전에는 SystemExit을 던졌는데, SystemExit은 BaseException 직속이라
+    GUI의 `except Exception` 에 **안 잡힌다** — 그래서 실측 모드에서 연결
+    버튼을 눌러도 오류창조차 안 뜨고 아무 반응이 없는 것처럼 보였다.
+    (dry-run은 DLL을 아예 안 건드려서 '되는 것처럼' 보였던 것)"""
     bits = 8 * ctypes.sizeof(ctypes.c_void_p)
     if bits != 32:
-        raise SystemExit(
-            f"\n✘ KXCIClient.DLL은 32비트 전용인데 현재 파이썬은 {bits}비트입니다.\n"
-            "  VSCode: Ctrl+Shift+P -> Python: Select Interpreter -> 32비트 항목 선택\n"
-            "  또는 터미널에서: py -3.13-32 " + os.path.basename(__file__) + "\n"
+        raise RuntimeError(
+            f"KXCIClient.DLL은 32비트 전용인데 현재 파이썬은 {bits}비트입니다.\n"
+            "  터미널에서: py -3.13-32 " + os.path.basename(__file__) + "\n"
+            "  (VSCode라면 Ctrl+Shift+P -> Python: Select Interpreter -> 32비트 항목)"
         )
+
+
+def find_dll(name: str) -> str:
+    """DLL을 스크립트 위치 기준으로 자동 탐색한다.
+
+    프로젝트 폴더를 어디에 두든(다른 PC로 통째로 복사/클론해도) 코드를 고칠
+    필요가 없도록, 실행 중인 .py 파일 위치를 기준으로 찾는다. 못 찾으면
+    어디를 뒤졌는지 전부 나열해서 알려준다 — '경로는 맞는 것 같은데 안 된다'는
+    상황을 없애기 위함."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        here,                                  # 스크립트와 같은 폴더 (정상 배치)
+        os.path.join(here, "cli_tools"),       # 저장소 하위
+        os.path.dirname(here),                 # 한 단계 위
+        os.getcwd(),                           # 현재 작업 폴더
+        os.path.join(os.getcwd(), "cli_tools"),
+    ]
+    tried = []
+    for d in candidates:
+        p = os.path.join(d, name)
+        if p in tried:
+            continue
+        tried.append(p)
+        if os.path.exists(p):
+            return p
+    raise RuntimeError(
+        f"'{name}' 을 찾지 못했습니다. 아래 위치를 모두 확인했습니다:\n  "
+        + "\n  ".join(tried)
+        + f"\n\n→ {name} 을 {here} 폴더에 두세요 "
+          "(git clone 하면 자동으로 들어옵니다)."
+    )
+
+
+def load_cdecl_dll(name: str):
+    """DLL을 찾아서 ctypes.CDLL로 로드. 실패 시 원인을 구분해 안내한다.
+
+    파일은 분명히 있는데 로드가 실패하면 십중팔구 **의존 DLL 누락**이다.
+    KXCIclient.dll은 MSVCR120.dll(Visual C++ 2013 재배포 패키지 x86)을
+    필요로 하는데 Windows 기본 설치에는 없다 — 이때 파이썬이 내는 메시지가
+    'Could not find module ... (or one of its dependencies)' 라서 마치
+    경로 문제처럼 보인다. 실제로는 경로가 맞아도 나는 오류."""
+    path = find_dll(name)
+    try:
+        return ctypes.CDLL(path)
+    except OSError as e:
+        raise RuntimeError(
+            f"'{name}' 파일은 찾았지만 로드에 실패했습니다.\n"
+            f"  경로: {path}\n"
+            f"  원본 오류: {e}\n\n"
+            "→ 파일이 있는데 이 오류가 나면 대부분 **의존 DLL 누락**입니다.\n"
+            "   이 PC에 Visual C++ 2013 재배포 패키지(x86)를 설치하세요:\n"
+            "   https://www.microsoft.com/en-us/download/details.aspx?id=40784\n"
+            "   반드시 vcredist_x86.exe (64비트 OS에서도 x86!) 를 받으세요."
+        ) from e
 
 
 def load_json(path, default):
@@ -149,11 +208,7 @@ class Keithley4200:
             return
 
         _check_bitness()
-        dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), DLL_NAME)
-        if not os.path.exists(dll_path):
-            raise SystemExit(f"DLL을 찾을 수 없습니다: {dll_path}")
-
-        dll = ctypes.CDLL(dll_path)
+        dll = load_cdecl_dll(DLL_NAME)
         dll.OpenKXCIConnection_C.argtypes = [ctypes.c_char_p, ctypes.c_int,
                                              ctypes.POINTER(ctypes.c_int)]
         dll.OpenKXCIConnection_C.restype = ctypes.c_int
@@ -369,12 +424,10 @@ class BioLED:
 
         bits = 8 * ctypes.sizeof(ctypes.c_void_p)
         if bits != 32:
-            raise SystemExit(f"Mightex_BLSDriver_SDK.dll은 32비트 전용인데 현재 파이썬은 {bits}비트입니다.")
-        dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), BLS_DLL_NAME)
-        if not os.path.exists(dll_path):
-            raise SystemExit(f"DLL을 찾을 수 없습니다: {dll_path}")
-
-        dll = ctypes.CDLL(dll_path)
+            raise RuntimeError(
+                f"Mightex_BLSDriver_SDK.dll은 32비트 전용인데 현재 파이썬은 {bits}비트입니다.\n"
+                "  터미널에서: py -3.13-32 " + os.path.basename(__file__))
+        dll = load_cdecl_dll(BLS_DLL_NAME)
         dll.MTUSB_BLSDriverInitDevices.restype = ctypes.c_int
         dll.MTUSB_BLSDriverOpenDevice.argtypes = [ctypes.c_int]
         dll.MTUSB_BLSDriverOpenDevice.restype = ctypes.c_int
@@ -881,25 +934,37 @@ class App(tk.Tk):
         paned.add(bottom, weight=1)
 
     # ---------- 연결 ----------
+    # ⚠ 아래 두 핸들러는 `except Exception`이 아니라 `except BaseException`을
+    # 쓴다. SystemExit/KeyboardInterrupt 같은 BaseException 직속 예외가 올라오면
+    # tkinter 콜백 밖으로 조용히 빠져나가 **오류창도 없이 버튼이 먹통인 것처럼**
+    # 보이기 때문. (실측 모드 연결 실패를 며칠간 못 찾은 원인이 정확히 이것)
     def connect_smu(self):
         if self.smu is not None:
+            self.log("[4200] 이미 연결되어 있습니다 (해제 후 다시 연결하세요)")
             return
+        self.log(f"[4200] 연결 시도... (dry_run={self.dry_run.get()}, {IP.decode()}:{PORT})")
         try:
             self.smu = Keithley4200(dry=self.dry_run.get(), log=self.log)
             self.conn_status.config(text="● Keithley 연결됨", foreground="green")
-        except Exception as e:
-            messagebox.showerror("연결 실패", str(e))
+            self.log("[4200] 연결 완료")
+        except BaseException as e:  # noqa: BLE001 — 위 주석 참조
+            self.log(f"✘ Keithley 연결 실패: {type(e).__name__}: {e}")
+            messagebox.showerror("연결 실패", f"{type(e).__name__}\n\n{e}")
 
     def connect_led(self):
         if self.led is not None:
+            self.log("[LED] 이미 연결되어 있습니다")
             return
+        self.log(f"[LED] 연결 시도... (dry_run={self.dry_run.get()})")
         try:
             self.led = BioLED(dry=self.dry_run.get(), log=self.log)
             self.log("[LED] 연결됨")
-        except Exception as e:
+        except BaseException as e:  # noqa: BLE001
+            self.log(f"✘ BioLED 연결 실패: {type(e).__name__}: {e}")
             messagebox.showerror(
                 "BioLED 연결 실패",
-                f"{e}\n\nBLS 박스 전원이 켜져 있는지, USB 케이블이 데이터선 포함인지, "
+                f"{type(e).__name__}\n\n{e}\n\nBLS 박스 전원이 켜져 있는지, "
+                "USB 케이블이 데이터선 포함인지, "
                 "BioLEDController.exe가 완전히 종료됐는지 확인하세요.")
 
     def disconnect_all(self):

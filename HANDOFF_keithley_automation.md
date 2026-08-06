@@ -9,6 +9,66 @@
 > ⚠ 특히 "3. 실패한 접근"은 반드시 읽을 것. 여기 적힌 방법들은 이미 수 시간을
 > 들여 배제했으므로 다시 시도하면 시간 낭비다.
 
+## 0-7. 실측 모드에서만 연결 실패 — `SystemExit`이 `except Exception`을 빠져나간 버그
+
+증상: **Dry-run에서는 "연결됨"이 뜨는데 실측 모드에서는 연결 버튼이 먹통.**
+오류창조차 안 떴다.
+
+원인 두 가지가 겹쳐 있었다:
+
+1. **Dry-run은 애초에 아무것도 검증하지 않는다.** `Keithley4200.__init__`이
+   `if dry: return`으로 **DLL을 건드리기 전에 반환**한다. 그래서 dry-run의
+   "연결 성공"은 성공이 아니라 *아무 일도 안 한 것*이다 — 실측 모드와 비교
+   대조군이 될 수 없다.
+2. **`SystemExit`은 `Exception`이 아니라 `BaseException` 직속이다.**
+   `_check_bitness()`와 DLL 부재 검사가 `SystemExit`을 던졌는데, GUI의
+   `except Exception as e: messagebox.showerror(...)` 는 이걸 **못 잡는다.**
+   결과적으로 예외가 tkinter 콜백 밖으로 빠져나가 stderr로만 출력되고
+   (콘솔 없이 실행하면 보이지도 않음), 사용자에겐 **버튼이 아무 반응 없는
+   것처럼** 보였다.
+
+   ```
+   >>> issubclass(SystemExit, Exception)
+   False
+   >>> SystemExit.__mro__
+   (SystemExit, BaseException, object)
+   ```
+
+**수정:**
+- `_check_bitness()`와 DLL 관련 실패를 전부 **`RuntimeError`**(=`Exception` 하위)로 변경
+- `connect_smu()` / `connect_led()`를 **`except BaseException`**으로 방어하고,
+  실패 시 **로그창에도 반드시 남기도록** 변경(`✘ ... 실패: {타입}: {메시지}`)
+- 연결 시도 시작도 로그에 남김 → 버튼이 눌렸는지 자체를 확인 가능
+- 검증: 64비트 파이썬에서 실측 연결 시도 시 예전엔 무반응이었으나, 이제
+  로그에 `✘ Keithley 연결 실패: RuntimeError: ...32비트 전용...`이 뜨는 것 확인
+
+**교훈:** GUI 콜백 안에서는 `except Exception`만으로 부족하다. CLI 스크립트
+(`cli_tools/*.py`)의 `SystemExit`은 터미널에 메시지를 찍고 정상 종료하는
+올바른 동작이므로 **그대로 두었다** — 문제는 GUI 컨텍스트에서만 발생.
+
+## 0-8. DLL 경로 자동 탐색 — 컴퓨터를 바꿔도 코드 수정 불필요
+
+원래도 `os.path.dirname(os.path.abspath(__file__))` 기준이라 **폴더를 통째로
+옮겨도 코드를 고칠 필요는 없었다**(스크립트 위치를 따라감). 다만 못 찾았을 때
+메시지가 불친절해서 "경로 문제인가?" 하고 헤매기 쉬웠다.
+
+`find_dll(name)` / `load_cdecl_dll(name)` 헬퍼를 추가해:
+- 스크립트 폴더 → `cli_tools/` → 상위 폴더 → CWD → `CWD/cli_tools` 순으로 자동 탐색
+- 못 찾으면 **뒤진 경로를 전부 나열**해서 안내
+- 파일은 있는데 로드가 실패하면 → **의존 DLL 누락**임을 명시하고
+  VC++ 2013 재배포 패키지(x86) 링크를 안내
+
+  ⚠ 이게 다른 노트북에서 겪은 그 오류다. `KXCIclient.dll`은
+  **`MSVCR120.dll`**(VC++ 2013 x86)을 필요로 하는데 Windows 기본에는 없다.
+  이때 파이썬 메시지가 `Could not find module ... (or one of its
+  dependencies)` 라서 **경로 문제처럼 보이지만 경로가 맞아도 나는 오류**다.
+  (근거: PE 헤더 직접 파싱 → `WS2_32.dll`, `MSVCR120.dll`, `KERNEL32.dll`)
+
+  BioLED DLL 2종은 시스템 기본 DLL만 쓰므로 이 문제가 없다.
+
+**결론: 다운로드 폴더 같은 곳으로 경로를 고정할 필요 없다.** `git clone` 하면
+DLL이 같이 딸려오고, 코드가 알아서 자기 옆에서 찾는다.
+
 ## 0-6. Git으로 두 노트북 동기화하기
 
 측정에 실제로 쓸 노트북과 개발 중인 이 PC를 코드 기준으로 맞추기 위해
