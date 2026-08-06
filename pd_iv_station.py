@@ -700,10 +700,10 @@ class Session:
         ws_set.append([SEP_TOKEN])
 
         bracket = self.bracket_code()
-        # 파일명 서식: [측정순서] (샘플명).xlsx
-        # pd_app 파서는 소괄호/대괄호를 각각 독립적으로 re.search 하므로 순서에
-        # 구애받지 않는다(양쪽 순서 모두 동일하게 파싱되는 것을 확인함).
-        fname = f"[{bracket}] ({safe_filename(display_name)}).xlsx"
+        # 파일명 서식: (샘플명)[측정순서].xlsx
+        # pd_app 파서는 소괄호/대괄호를 각각 독립적으로 re.search 하므로 순서
+        # 자체는 무관하지만, 기존 파일들과 통일하기 위해 이 순서를 쓴다.
+        fname = f"({safe_filename(display_name)})[{bracket}].xlsx"
         path = os.path.join(out_dir, fname)
         wb.save(path)
         return path
@@ -1063,7 +1063,7 @@ class App(tk.Tk):
         log_box = ttk.Frame(bottom)
         log_box.pack(fill="both", expand=True)
         log_scroll = ttk.Scrollbar(log_box, orient="vertical")
-        self.log_text = tk.Text(log_box, height=8, yscrollcommand=log_scroll.set)
+        self.log_text = tk.Text(log_box, height=5, yscrollcommand=log_scroll.set)
         log_scroll.config(command=self.log_text.yview)
         log_scroll.pack(side="right", fill="y")
         self.log_text.pack(side="left", fill="both", expand=True)
@@ -1546,19 +1546,20 @@ class App(tk.Tk):
                                        font=("", 9, "bold"), fg="#666")
         self.live_state_lbl.grid(row=0, column=5, padx=(10, 4))
 
-        preset_row = ttk.Frame(live)
-        preset_row.grid(row=1, column=0, columnspan=6, sticky="w", pady=(6, 0))
-        ttk.Button(preset_row, text="+ 현재 세기를 프리셋으로", command=self.add_led_preset
-                  ).pack(side="left", padx=(0, 4))
-        ttk.Button(preset_row, text="프리셋 수정", command=self.edit_led_preset
-                  ).pack(side="left", padx=4)
-        ttk.Button(preset_row, text="프리셋 삭제", command=self.delete_led_preset
-                  ).pack(side="left", padx=4)
+        # 8:10 그래프는 '세로'가 병목이라 가로는 남는다 — 프리셋 버튼을 아랫줄로
+        # 내리지 않고 같은 줄에 붙여 세로 한 줄(약 30px)을 그래프에 돌려준다.
+        ttk.Separator(live, orient="vertical").grid(row=0, column=6, sticky="ns", padx=8)
+        ttk.Button(live, text="+ 현재 세기를 프리셋으로", command=self.add_led_preset
+                  ).grid(row=0, column=7, padx=2)
+        ttk.Button(live, text="프리셋 수정", command=self.edit_led_preset
+                  ).grid(row=0, column=8, padx=2)
+        ttk.Button(live, text="프리셋 삭제", command=self.delete_led_preset
+                  ).grid(row=0, column=9, padx=2)
 
-        ttk.Label(live, foreground="gray", wraplength=1040, justify="left",
-                 text="슬라이더 드래그 / 숫자칸 클릭 후 ↑↓키로 0.1 %씩 → 즉시 반영. 파워미터로 맞춘 뒤 "
-                      "'+ 현재 세기를 프리셋으로'. OD = ND 필터 값(OD0=필터 없음), 새 OD는 직접 입력."
-                 ).grid(row=2, column=0, columnspan=6, sticky="w", pady=(2, 0))
+        ttk.Label(live, foreground="gray",
+                 text="슬라이더 드래그 / 숫자칸 ↑↓키로 0.1 %씩 → 즉시 반영. "
+                      "OD = ND 필터 값(OD0=필터 없음), 새 OD는 직접 입력."
+                 ).grid(row=1, column=0, columnspan=10, sticky="w", pady=(2, 0))
 
         # (실시간 조절 상태 변수는 __init__에서 초기화 — _build 도중 실패해도
         #  destroy -> disconnect_all 경로에서 AttributeError가 안 나도록)
@@ -1583,16 +1584,18 @@ class App(tk.Tk):
         mid = ttk.Frame(frame)
         mid.pack(fill="both", expand=True, pady=8)
 
-        # 그래프에 폭을 몰아주기 위해 목록 쪽은 늘어나지 않게 고정(expand=False).
+        # 8:10(세로가 긴) 그래프는 '세로'가 병목이라, 폭을 아무리 줘도 작도
+        # 영역이 커지지 않고 좌우 여백만 늘어난다. 그래서 남는 폭은 그래프가
+        # 아니라 **트레이스 목록**에 준다(라벨/파일명이 잘리지 않게).
         list_frame = ttk.LabelFrame(mid, text="측정된 트레이스", padding=8)
-        list_frame.pack(fill="y", expand=False, side="left")
+        list_frame.pack(fill="both", expand=True, side="left")
         self.trace_tree = ttk.Treeview(list_frame, columns=("label", "range"),
                                        show="headings", height=8)
         self.trace_tree.heading("label", text="라벨")
         self.trace_tree.heading("range", text="Range I")
-        self.trace_tree.column("label", width=90)
-        self.trace_tree.column("range", width=70)
-        self.trace_tree.pack(fill="y", expand=True, side="left")
+        self.trace_tree.column("label", width=110, stretch=True)
+        self.trace_tree.column("range", width=90, stretch=False)
+        self.trace_tree.pack(fill="both", expand=True, side="left")
         btn_col = ttk.Frame(list_frame)
         btn_col.pack(side="left", padx=8, fill="y")
         ttk.Button(btn_col, text="선택 삭제", command=self.delete_selected_trace).pack(pady=2, fill="x")
@@ -1602,13 +1605,14 @@ class App(tk.Tk):
         ttk.Label(btn_col, text="중간 삭제·순서 변경\n모두 가능", foreground="gray",
                  justify="left").pack(pady=(8, 0), anchor="w")
 
+        # 그래프는 세로로만 늘어나면 되므로 폭은 고정(expand=False)한다.
         plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일, 8:10 비율)", padding=4)
-        plot_frame.pack(fill="both", expand=True, side="left", padx=(8, 0))
+        plot_frame.pack(fill="y", expand=False, side="right", padx=(8, 0))
         # 기본 크기도 8:10(가로:세로)으로 맞춘다. 창을 늘려도 비율이 깨지지
         # 않도록 실제 작도 영역은 _redraw_plot에서 다시 8:10으로 맞춘다.
-        self.plot_canvas = tk.Canvas(plot_frame, width=400, height=500, background="white",
+        self.plot_canvas = tk.Canvas(plot_frame, width=440, height=550, background="white",
                                      highlightthickness=1, highlightbackground="#ccc")
-        self.plot_canvas.pack(fill="both", expand=True)
+        self.plot_canvas.pack(fill="y", expand=True)
         self.plot_canvas.bind("<Configure>", lambda e: self._redraw_plot())
 
     def _wl_key(self):
@@ -1918,7 +1922,7 @@ class App(tk.Tk):
         # (샘플명)[브래킷코드].xlsx 형식으로 자동 조합되며, 샘플명 칸을 고치면
         # 이 미리보기도 즉시 따라 바뀐다.
         name = self.sample_name_var.get().strip() or (self.session.sample_name if self.session else "")
-        self.filename_lbl.config(text=f"내보낼 파일명:  [{bracket}] ({safe_filename(name)}).xlsx")
+        self.filename_lbl.config(text=f"내보낼 파일명:  ({safe_filename(name)})[{bracket}].xlsx")
         self._redraw_plot()
 
     def _selected_index(self):
@@ -2017,6 +2021,12 @@ class App(tk.Tk):
         scale = min(cw / box_w, ch_ / box_h)
         w = max(int(box_w * scale), 10)
         h = max(int(box_h * scale), 10)
+        # 캔버스 폭을 세로에 맞춰 따라가게 해서 좌우 여백을 없앤다.
+        # (세로가 병목이므로 폭이 남으면 그냥 빈 공간이 된다)
+        want_w = int(h * ASPECT_W / ASPECT_H) + 2 * 4
+        if abs(int(c.cget("width")) - want_w) > 8:
+            c.config(width=want_w)
+
         off_x = (cw - w) // 2
         off_y = (ch_ - h) // 2
         # 이하 좌표는 전부 (0,0)~(w,h) 기준으로 계산하고, 함수 끝에서 한 번에
