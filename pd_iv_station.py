@@ -297,15 +297,25 @@ class Keithley4200:
         if self.dry:
             return True
         t0 = time.time()
+        first_poll = True
         while time.time() - t0 < max_wait_s:
             status = self.spoll()
             if status & BIT_SYNTAX_ERR:
                 self.log("    ⚠ KXCI Syntax Error 비트 감지 — 직전 명령 문법 확인 필요")
             if status & BIT_DATA_READY:
+                # 트리거 직후 첫 폴링에서 이미 완료로 나오는 건 물리적으로
+                # 이상하다(스윕에 최소한의 시간은 걸린다). BC로 비트를 지웠는데도
+                # 이러면 장비가 명령을 안 받았거나 이전 데이터가 남은 것.
+                if first_poll:
+                    self.log("    ⚠ 트리거 직후 첫 조회에서 이미 'Data Ready' — 측정이 실제로 "
+                            "수행되지 않았거나 이전 데이터일 수 있습니다(스윕 설정/채널 정의 확인)")
+                self._last_wait_s = time.time() - t0
                 return True
+            first_poll = False
             if on_tick:
                 on_tick(time.time() - t0)
             time.sleep(poll_s)
+        self._last_wait_s = time.time() - t0
         self.log("    ⚠ wait_done 타임아웃 — Data Ready 비트가 서지 않음")
         return False
 
@@ -383,6 +393,14 @@ class Keithley4200:
 
     # ---------- MD 페이지: 트리거 + 조회 ----------
     def trigger(self):
+        """측정 시작. **반드시 BC로 이전 측정의 Data Ready 비트를 먼저 지운다.**
+
+        BC를 안 보내면 직전 측정에서 세워진 Data Ready(B0)가 그대로 남아 있어,
+        wait_done()이 첫 폴링에서 곧바로 '완료'로 판단하고 빠져나온다. 그러면
+        스윕이 실제로 끝나기도 전에 DO로 데이터를 읽어서 **측정이 비정상적으로
+        빨리 끝난 것처럼 보이고, 직전 측정의 낡은 데이터를 가져올 수 있다.**
+        (매뉴얼 5.6절: BC = 데이터 버퍼 및 DataReady 비트 클리어)"""
+        self._w("BC")
         self._w("MD")
         self._w("ME1")
 
@@ -657,9 +675,10 @@ DEFAULT_STATION_CONFIG = {
 DEFAULT_STATION_PRESETS = {
     "presets": {
         "default": {
-            "dark_neg": {"start": 0.0, "stop": -1.0, "step": 0.05, "compliance": 1e-3},
-            "dark_pos": {"start": 0.0, "stop": 1.0, "step": 0.05, "compliance": 1e-3},
-            "photo": {"start": -1.0, "stop": 1.0, "step": 0.05, "compliance": 1e-3},
+            # 전압 스텝 기본 0.01 V — Dark는 101점, 광전류(-1~+1)는 201점이 된다
+            "dark_neg": {"start": 0.0, "stop": -1.0, "step": 0.01, "compliance": 1e-3},
+            "dark_pos": {"start": 0.0, "stop": 1.0, "step": 0.01, "compliance": 1e-3},
+            "photo": {"start": -1.0, "stop": 1.0, "step": 0.01, "compliance": 1e-3},
             "sweep_type": 1,
             "integration": {"mode": 1, "delay": 0, "filter": 0, "plc": 1.0},
             "resolution_digits": 6,
@@ -1934,11 +1953,22 @@ class App(tk.Tk):
                 self.smu.set_range_fixed(sweep_ch["ch"], range_A, compliance)
             else:
                 self.smu._w(f"RG{sweep_ch['ch']},{range_A:g}")
+        expected = int(round(abs(stop - start) / abs(step))) + 1 if step else 0
+        t_trig = time.time()
         self.smu.trigger()
         self.smu.wait_done()
+        elapsed = time.time() - t_trig
         v_pairs = self.smu.fetch_with_status(sweep_ch["vname"])
         i_pairs = self.smu.fetch_with_status(sweep_ch["iname"])
         n = min(len(v_pairs), len(i_pairs))
+        # 실제로 얼마나 걸렸는지 항상 남긴다 — "너무 빨리 지나간다" 같은 의심을
+        # 감이 아니라 숫자로 확인할 수 있어야 한다.
+        per_pt = (elapsed / n * 1000) if n else 0.0
+        self.log(f"    측정 소요 {elapsed:.2f}s / {n}점 (점당 {per_pt:.1f}ms), "
+                f"예상 점수 {expected}")
+        if expected and n != expected:
+            self.log(f"    ⚠ 수신 점수({n})가 설정값에서 계산한 점수({expected})와 다릅니다 "
+                    "— 스윕이 끝나기 전에 읽었을 가능성")
         data = [(v_pairs[k][0], i_pairs[k][0], i_pairs[k][1]) for k in range(n)]
         # 'N'(Normal) 이외의 상태 코드는 컴플라이언스/오버플로 가능성을 뜻한다
         # (정확한 코드 의미는 매뉴얼 상태 문자 표로 재확인할 것).
