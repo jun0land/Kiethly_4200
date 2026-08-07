@@ -290,16 +290,25 @@ class Keithley4200:
             return False
         return True
 
+    def _log_fetch(self, name, raw, n):
+        """조회 결과를 한 줄로 요약한다.
+
+        예전엔 원본 응답을 통째로 찍었는데, 201점이면 한 줄이 수천 자라
+        로그창이 그것만으로 가득 찼다. 평소엔 개수만 남기고, **점이 하나도
+        안 왔을 때만** 원인 파악에 필요한 원본을 보여준다."""
+        if n == 0:
+            self.log(f"    [DO '{name}'] 0점 — 원본 응답: {raw[:200]!r}")
+        else:
+            self.log(f"    [DO '{name}'] {n}점 수신")
+
     def _fetch(self, name: str):
         raw = self._raw_send(f"DO '{name}'")
-        # 파일럿 단계라 항상 원본 응답을 로그에 남긴다 — "0점 수신" 같은 문제를
-        # 진단하려면 파싱 전 raw 문자열을 봐야 한다.
-        self.log(f"    [DO '{name}'] raw={raw!r}")
         out = []
         for tok in raw.split(","):
             m = _NUM.search(tok)
             if m:
                 out.append(float(m.group()))
+        self._log_fetch(name, raw, len(out))
         return out
 
     def fetch_with_status(self, name: str):
@@ -308,13 +317,13 @@ class Keithley4200:
         이 코드가 필요하다 — 정확한 코드별 의미는 Reference Manual의 데이터
         상태 문자 표(9절 부근)로 재확인할 것, 'N'만 정상으로 잠정 취급한다."""
         raw = self._raw_send(f"DO '{name}'")
-        self.log(f"    [DO '{name}'] raw={raw!r}")
         out = []
         for tok in raw.split(","):
             m = _TOK_STATUS.search(tok)
             if m:
                 status = (m.group(1) or "").strip()
                 out.append((float(m.group(2)), status))
+        self._log_fetch(name, raw, len(out))
         return out
 
     def spoll(self):
@@ -553,7 +562,7 @@ class BioLED:
             raise RuntimeError(
                 f"이 BioLED 장비에는 채널 {channel}번이 없습니다 "
                 f"(사용 가능: 1~{self.channels}번).\n\n"
-                "파장↔채널 배정이 실제 장비와 다릅니다. 상단 'BioLED 채널 설정'에서 "
+                "파장↔채널 배정이 실제 장비와 다릅니다. 상단 'LED 포트 배정'에서 "
                 "실제로 LED가 꽂힌 채널 번호로 고쳐주세요."
             )
 
@@ -866,6 +875,13 @@ HELP_TEXT = """\
       샘플에 대한 측정 묶음, sessions\\폴더에 즉시 CSV로 백업됨).
     - 파장 드롭다운은 "8: 940 nm"처럼 분석 앱 브래킷 코드 번호를 같이 보여주고,
       큰 파장(940)이 위로 오도록 정렬돼 있다.
+    - ⚠ 헷갈리기 쉬운 두 가지 번호 구분:
+        · 파장 목록의 "8: 940 nm" 앞 번호 = **브래킷 코드**.
+          엑셀 파일명 (샘플명)[dd8].xlsx 에 들어가고, 분석 앱이 이 글자로
+          트레이스가 무슨 파장인지 복원한다. 고정값이라 건드릴 일이 없다.
+        · 상단 "LED 포트 배정" = **BioLED 하드웨어의 출력 포트 번호**.
+          그 파장 LED 케이블을 본체 몇 번 포트에 꽂았는지를 알려주는 값이다.
+          케이블을 다른 포트로 옮겨 꽂았을 때만 바꾸면 된다.
     - "OD(ND필터)" 칸으로 세기 프리셋을 OD별로 나눠 관리한다. ND 필터는
       사람이 손으로 끼우는 것이라 프로그램이 알 수 없지만, 같은 %라도 OD가
       다르면 실제 광량이 다르므로 "이 파장 · 이 OD"로 묶어서 등록해야
@@ -979,8 +995,7 @@ class App(tk.Tk):
         self._busy_widgets = []       # 측정 중 잠글 위젯들
         self._live_partial = None     # 측정 중 실시간으로 그릴 부분 데이터
 
-        # 디자인 토큰/테마 적용 — sv-ttk가 없으면 내장 테마로 자동 대체되므로
-        # 실패해도 프로그램은 그대로 동작한다.
+        # 디자인 토큰/테마 적용 (실패해도 기본 모양으로 그대로 동작)
         try:
             import ui_theme
             self.theme = ui_theme.apply(self)
@@ -993,6 +1008,7 @@ class App(tk.Tk):
         self._build()
         self._on_dry_run_change()
         self._refresh_live_state()   # 시작 시 '● BioLED 미연결'로 표시
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._drain_after_id = self.after(150, self._drain_queue)
 
     def _on_dry_run_change(self):
@@ -1034,6 +1050,23 @@ class App(tk.Tk):
         w, h = min(w, sw - 40), min(h, sh - 80)
         self.geometry(f"{w}x{h}")
         self.minsize(min(mw, sw - 40), min(mh, sh - 80))
+
+    def _center_dialog(self, win):
+        """팝업을 메인 창 한가운데에 띄운다.
+
+        위치를 지정하지 않으면 Windows가 화면 좌측 상단 근처에 배치해서,
+        큰 모니터에서는 눈이 한참 이동해야 한다."""
+        win.update_idletasks()
+        w, h = win.winfo_width(), win.winfo_height()
+        if w <= 1:                       # 아직 배치 전이면 요청 크기를 쓴다
+            w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        px, py = self.winfo_rootx(), self.winfo_rooty()
+        pw, ph = self.winfo_width(), self.winfo_height()
+        x, y = px + (pw - w) // 2, py + (ph - h) // 3   # 살짝 위쪽이 보기 편하다
+        # 화면 밖으로 나가지 않게
+        x = max(0, min(x, self.winfo_screenwidth() - w))
+        y = max(0, min(y, self.winfo_screenheight() - h))
+        win.geometry(f"+{x}+{y}")
 
     def _register_busy_widget(self, w):
         """측정 중 잠글 위젯 등록. 측정과 무관한 것(로그창, 그래프, 폴더 열기)은
@@ -1096,7 +1129,7 @@ class App(tk.Tk):
         self.led_status = ttk.Label(top, text="● BioLED 미연결", foreground="gray")
         self.led_status.pack(side="left")
         ttk.Button(top, text="BioLED 연결", command=self.connect_led).pack(side="left", padx=4)
-        ttk.Button(top, text="채널 설정", command=self.edit_led_channels).pack(side="left", padx=2)
+        ttk.Button(top, text="LED 포트 배정", command=self.edit_led_channels).pack(side="left", padx=2)
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Button(top, text="모두 해제", command=self.disconnect_all).pack(side="left", padx=4)
 
@@ -1133,7 +1166,7 @@ class App(tk.Tk):
         if self.smu is not None:
             self.log("[4200] 이미 연결되어 있습니다 (해제 후 다시 연결하세요)")
             return
-        self.log(f"[4200] 연결 시도... (dry_run={self.dry_run.get()}, {IP.decode()}:{PORT})")
+        self.log(f"[4200] 연결 중… {IP.decode()}:{PORT}")
         try:
             self.smu = Keithley4200(dry=self.dry_run.get(), log=self.log)
             self.conn_status.config(text="● Keithley 연결됨", foreground="green")
@@ -1146,7 +1179,7 @@ class App(tk.Tk):
         if self.led is not None:
             self.log("[LED] 이미 연결되어 있습니다")
             return
-        self.log(f"[LED] 연결 시도... (dry_run={self.dry_run.get()})")
+        self.log("[LED] 연결 중…")
         try:
             self.led = BioLED(dry=self.dry_run.get(), log=self.log)
             self.log("[LED] 연결됨")
@@ -1192,7 +1225,7 @@ class App(tk.Tk):
                if wl in PRETTY_LABEL and info.get("channel", 0) > nch]
         if bad:
             self.log(f"[LED] ⚠ 이 장비는 채널이 {nch}개뿐인데 다음 파장이 그보다 큰 번호로 "
-                    f"배정돼 있습니다: {', '.join(bad)} — 상단 '채널 설정'에서 고치세요.")
+                    f"배정돼 있습니다: {', '.join(bad)} — 상단 'LED 포트 배정'에서 고치세요.")
 
     # ======================================================
     # 탭 0 · 사용법
@@ -1205,7 +1238,9 @@ class App(tk.Tk):
         box.pack(fill="both", expand=True)
         scroll = ttk.Scrollbar(box, orient="vertical")
         text = tk.Text(box, wrap="word", yscrollcommand=scroll.set,
-                       font=("", 10), padx=10, pady=8, background="#fdfdfd")
+                       font=(self.theme.get("ui", ""), 10), padx=12, pady=10,
+                       background="#ffffff", relief="flat",
+                       spacing1=1, spacing3=3)
         scroll.config(command=text.yview)
         scroll.pack(side="right", fill="y")
         text.pack(side="left", fill="both", expand=True)
@@ -1839,15 +1874,24 @@ class App(tk.Tk):
         채널이 그보다 적을 수 있다(BLS-SA02 등). 실제로 LED가 꽂힌 채널
         번호로 맞춰줘야 한다."""
         top = tk.Toplevel(self)
-        top.title("BioLED 채널 설정")
+        top.title("BioLED 채널 설정 — LED가 꽂힌 물리 포트 번호")
         top.transient(self)
         top.resizable(False, False)
 
         nch = self.led.channels if (self.led and self.led.channels) else None
-        head = ("파장별로 BioLED의 몇 번 채널에 연결돼 있는지 지정하세요.\n"
-                + (f"이 장비에서 사용 가능한 채널: 1 ~ {nch}번"
-                   if nch else "장비 미연결 — 연결하면 사용 가능한 채널 수를 확인할 수 있습니다."))
-        ttk.Label(top, text=head, justify="left").pack(padx=14, pady=(14, 8), anchor="w")
+        ttk.Label(top, text="BioLED 본체의 몇 번 출력 포트에 LED가 꽂혀 있는지",
+                 style="H2.TLabel").pack(padx=14, pady=(14, 2), anchor="w")
+        # 브래킷 코드와 헷갈리기 쉬워 차이를 명시한다(실제로 혼동 사례가 있었음)
+        ttk.Label(top, justify="left", style="Muted.TLabel",
+                 text="※ 탭3 파장 목록의 '8: 940 nm' 같은 번호와는 다릅니다.\n"
+                      "   그 번호는 엑셀 파일명에 쓰이는 브래킷 코드이고,\n"
+                      "   여기 번호는 BioLED 하드웨어의 출력 포트 번호입니다.\n"
+                      "   LED 케이블을 다른 포트에 꽂았을 때만 바꾸면 됩니다."
+                 ).pack(padx=14, pady=(0, 8), anchor="w")
+        ttk.Label(top, justify="left",
+                 text=(f"이 장비에서 사용 가능한 포트: 1 ~ {nch}번" if nch
+                       else "장비 미연결 — 연결하면 사용 가능한 포트 수를 확인할 수 있습니다.")
+                 ).pack(padx=14, pady=(0, 8), anchor="w")
 
         body = ttk.Frame(top)
         body.pack(padx=14)
@@ -1855,9 +1899,10 @@ class App(tk.Tk):
         for i, wl in enumerate(WAVELENGTHS):
             ttk.Label(body, text=PRETTY_LABEL[wl], width=10, anchor="w").grid(
                 row=i, column=0, sticky="w", pady=2)
+            ttk.Label(body, text="→ 포트", style="Muted.TLabel").grid(row=i, column=1, padx=(6, 4))
             v = tk.IntVar(value=self.led_settings["channels"].get(wl, {}).get("channel", i + 1))
             ttk.Spinbox(body, from_=1, to=(nch or 8), textvariable=v, width=6).grid(
-                row=i, column=1, pady=2)
+                row=i, column=2, pady=2)
             vars_[wl] = v
 
         def save():
@@ -1873,6 +1918,7 @@ class App(tk.Tk):
         ttk.Button(btns, text="저장", command=save).pack(side="left", padx=4)
         ttk.Button(btns, text="취소", command=top.destroy).pack(side="left", padx=4)
         top.update_idletasks()
+        self._center_dialog(top)
         top.grab_set()
         top.wait_window()
 
@@ -1910,6 +1956,7 @@ class App(tk.Tk):
 
         # 창이 실제로 뜬 뒤에 포커스를 줘야 확실히 먹는다.
         top.update_idletasks()
+        self._center_dialog(top)
         top.grab_set()
         ent.focus_force()
         ent.selection_range(0, "end")
@@ -2047,6 +2094,7 @@ class App(tk.Tk):
             result["value"] = var.get()
             top.destroy()
         ttk.Button(top, text="확인", command=ok).pack(pady=12)
+        self._center_dialog(top)
         top.wait_window()
         return result["value"]
 
@@ -2522,10 +2570,42 @@ class App(tk.Tk):
         t = list(range(len(i)))
         return list(zip(t, i))
 
+    def on_close(self):
+        """창 X 버튼을 눌렀을 때. 장비가 물려 있으면 바로 닫지 않고 확인한다.
+
+        측정 중이거나 광원이 켜진 채로 창만 닫으면 LED가 계속 켜져 있거나
+        장비가 어중간한 상태로 남을 수 있어서, 한 번 물어보고 정리 후 닫는다."""
+        pending = []
+        if self.busy:
+            pending.append("• 측정이 아직 진행 중입니다")
+        if self._live_is_on:
+            pending.append("• BioLED 광원이 켜져 있습니다")
+        if self.smu is not None:
+            pending.append("• Keithley 4200이 연결돼 있습니다")
+        if self.led is not None:
+            pending.append("• BioLED가 연결돼 있습니다")
+
+        if pending:
+            msg = ("아래 항목이 정리되지 않았습니다.\n\n"
+                   + "\n".join(pending)
+                   + "\n\n그래도 종료할까요?\n"
+                     "(종료하면 광원을 끄고 장비 연결을 자동으로 해제합니다)")
+            if self.busy:
+                msg += "\n\n⚠ 측정 중 종료하면 진행 중인 측정 결과를 잃을 수 있습니다."
+            if not messagebox.askyesno("종료 확인", msg, icon="warning", default="no"):
+                return
+        self.destroy()
+
     def destroy(self):
         try:
             if getattr(self, "_drain_after_id", None):
                 self.after_cancel(self._drain_after_id)
+            # 광원부터 끄고(소자 보호) 그다음 연결 해제
+            try:
+                if self._live_is_on:
+                    self.live_off()
+            except Exception:  # noqa: BLE001
+                pass
             self.disconnect_all()
         finally:
             super().destroy()
