@@ -9,34 +9,49 @@ NBEDL-Exp-Assistant / Photodetector I-V Studio(둘 다 Streamlit)와 색·폰트
   #f68b21  보조 주황   (Exp-Assistant)
   #c53a17  진한 강조   (호버/눌림)
   #1a1a1a  본문 텍스트
-  #9a8f89 / #7a716c    흐린 텍스트
+  #9a8f89 / #7a716c    흐린 텍스트 (따뜻한 회색 계열)
   Pretendard           UI 폰트 (양쪽 공통)
   Myriad Pro           그래프 폰트 (I-V Studio)
 
-⚠ tkinter의 한계(정직하게):
-  둥근 모서리·그림자·애니메이션·글래스모피즘은 재현할 수 없다. 웹앱과
-  '똑같이'가 아니라 **같은 색·같은 폰트·같은 톤**까지가 목표다.
+⚠ 왜 sv-ttk(Sun Valley)를 안 쓰는가 — 실측으로 확인한 사실:
+   sv-ttk의 위젯은 **미리 렌더링된 PNG 스프라이트**로 그려진다.
+   `Style.element_options('AccentButton.button')` 이 빈 튜플 `()` 이라
+   background/foreground 를 설정해도 **그대로 무시되고 파란색이 유지된다.**
+   (설정값은 스타일 DB에 저장돼 lookup 으로는 보이지만 그리기에 안 쓰인다)
+   반면 'clam' 은 색으로 직접 그리는 테마라
+   Button.border -> ('bordercolor','lightcolor','darkcolor',...)
+   Entry.field   -> ('bordercolor','lightcolor','fieldbackground')
+   처럼 색 옵션을 노출한다. 그래서 **주황/회색 팔레트를 실제로 반영하려면
+   clam 이 맞다.** 모양은 sv-ttk가 더 현대적이지만 색을 못 바꾸면 디자인
+   룰을 맞춘다는 목적 자체가 무너진다.
 
-sv-ttk(Sun Valley 테마)가 있으면 그걸 바탕으로 쓰고, 없으면 내장 'clam'
-테마로 자동 대체한다 — 즉 sv-ttk가 없어도 프로그램은 정상 동작한다.
+⚠ tkinter의 한계(정직하게):
+   둥근 모서리·그림자·애니메이션·글래스모피즘은 재현할 수 없다. 웹앱과
+   '똑같이'가 아니라 **같은 색·같은 폰트·같은 톤**까지가 목표다.
 """
 
 from __future__ import annotations
 
-import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
 # ---------------- 디자인 토큰 ----------------
-ACCENT = "#ed542b"
-ACCENT_HOVER = "#c53a17"
-ACCENT_SOFT = "#f68b21"
+ACCENT = "#ed542b"          # 주 강조 (버튼, 선택, 강조 텍스트)
+ACCENT_HOVER = "#c53a17"    # 호버/눌림
+ACCENT_SOFT = "#f68b21"     # 보조 주황
+ACCENT_TINT = "#fdece7"     # 아주 옅은 주황 (선택 배경)
+
 TEXT = "#1a1a1a"
-TEXT_MUTED = "#7a716c"
+TEXT_MUTED = "#7a716c"      # 따뜻한 회색
 TEXT_FAINT = "#9a8f89"
-BG = "#ffffff"
-BG_SUBTLE = "#f7f5f4"
-BORDER = "#e3dedb"
+
+# 표면(따뜻한 회색 계열 — 파란빛 도는 기본 회색 대신)
+BG = "#faf8f7"
+SURFACE = "#ffffff"
+SURFACE_ALT = "#f2efed"
+BORDER = "#ddd6d2"
+BORDER_STRONG = "#c9c0bb"
+DISABLED_FG = "#b3aaa5"
 
 OK_FG = "#0a7d28"
 WARN_BG = "#fff3cd"
@@ -44,7 +59,6 @@ WARN_FG = "#7a5b00"
 DANGER_BG = "#f8d7da"
 DANGER_FG = "#7a1c1c"
 
-# 폰트 우선순위 — 설치돼 있는 첫 번째를 쓴다
 UI_FONT_STACK = ["Pretendard", "Malgun Gothic", "맑은 고딕", "Segoe UI"]
 PLOT_FONT_STACK = ["Myriad Pro", "Pretendard", "Segoe UI"]
 
@@ -55,7 +69,6 @@ SIZE_H2 = 11
 
 
 def pick_font(root, stack, default="TkDefaultFont"):
-    """설치된 폰트 중 우선순위가 가장 높은 것을 고른다."""
     try:
         fams = set(tkfont.families(root))
     except Exception:  # noqa: BLE001
@@ -67,56 +80,122 @@ def pick_font(root, stack, default="TkDefaultFont"):
 
 
 def apply(root):
-    """루트 창에 테마를 적용하고, 쓸 수 있는 폰트 이름들을 돌려준다.
+    """루트 창에 테마를 적용하고 폰트 정보를 돌려준다.
+    반환: {"ui": UI폰트, "plot": 그래프폰트, "themed": bool}"""
+    ui = pick_font(root, UI_FONT_STACK)
+    plot = pick_font(root, PLOT_FONT_STACK, default=ui)
 
-    반환: {"ui": <UI 폰트명>, "plot": <그래프 폰트명>, "themed": bool}
-    """
-    ui_font = pick_font(root, UI_FONT_STACK)
-    plot_font = pick_font(root, PLOT_FONT_STACK, default=ui_font)
-
-    themed = False
+    st = ttk.Style(root)
     try:
-        import sv_ttk  # 순수 파이썬(.py/.tcl/.png) — 32비트에서도 안전
-        sv_ttk.set_theme("light")
+        st.theme_use("clam")   # 색을 실제로 반영할 수 있는 테마
         themed = True
-    except Exception:  # noqa: BLE001 — 미설치/로드 실패 모두 여기로
-        try:
-            ttk.Style(root).theme_use("clam")
-        except Exception:  # noqa: BLE001
-            pass
+    except Exception:  # noqa: BLE001
+        themed = False
 
-    # tk 기본 폰트들을 한 번에 교체 — Text/Label 등 비-ttk 위젯까지 적용된다
     for name, size in (("TkDefaultFont", SIZE_BODY), ("TkTextFont", SIZE_BODY),
                        ("TkMenuFont", SIZE_BODY), ("TkHeadingFont", SIZE_H2),
                        ("TkFixedFont", SIZE_SMALL)):
         try:
-            f = tkfont.nametofont(name)
-            f.configure(family=ui_font, size=size)
+            tkfont.nametofont(name).configure(family=ui, size=size)
         except Exception:  # noqa: BLE001
             pass
 
-    st = ttk.Style(root)
+    try:
+        root.configure(background=BG)
+    except Exception:  # noqa: BLE001
+        pass
 
-    # 강조 버튼 — 주요 동작(측정 실행/내보내기 등)에만 쓴다
-    st.configure("Accent.TButton", font=(ui_font, SIZE_BODY, "bold"))
+    # ---------- 기본 표면 ----------
+    st.configure(".", background=BG, foreground=TEXT,
+                 fieldbackground=SURFACE, bordercolor=BORDER,
+                 lightcolor=BG, darkcolor=BG, font=(ui, SIZE_BODY))
+    st.configure("TFrame", background=BG)
+    st.configure("TLabel", background=BG, foreground=TEXT)
+    st.configure("TLabelframe", background=BG, bordercolor=BORDER,
+                 lightcolor=BG, darkcolor=BG)
+    st.configure("TLabelframe.Label", background=BG, foreground=TEXT_MUTED,
+                 font=(ui, SIZE_SMALL, "bold"))
+    st.configure("TPanedwindow", background=BG)
+    st.configure("TSeparator", background=BORDER)
+
+    # ---------- 일반 버튼 ----------
+    st.configure("TButton", background=SURFACE_ALT, foreground=TEXT,
+                 bordercolor=BORDER, lightcolor=SURFACE_ALT, darkcolor=SURFACE_ALT,
+                 focuscolor=ACCENT, padding=(10, 5), relief="flat")
+    st.map("TButton",
+           background=[("disabled", SURFACE_ALT), ("pressed", BORDER_STRONG),
+                       ("active", BORDER)],
+           foreground=[("disabled", DISABLED_FG)],
+           bordercolor=[("active", ACCENT), ("focus", ACCENT)])
+
+    # ---------- 강조 버튼(주요 동작) ----------
+    st.configure("Accent.TButton", background=ACCENT, foreground="#ffffff",
+                 bordercolor=ACCENT, lightcolor=ACCENT, darkcolor=ACCENT,
+                 font=(ui, SIZE_BODY, "bold"), padding=(12, 6), relief="flat")
     st.map("Accent.TButton",
-           background=[("active", ACCENT_HOVER), ("!disabled", ACCENT)],
-           foreground=[("!disabled", "#ffffff")])
+           background=[("disabled", "#e8c7bc"), ("pressed", ACCENT_HOVER),
+                       ("active", ACCENT_HOVER)],
+           foreground=[("disabled", "#ffffff")],
+           bordercolor=[("disabled", "#e8c7bc"), ("active", ACCENT_HOVER)],
+           lightcolor=[("pressed", ACCENT_HOVER), ("active", ACCENT_HOVER)],
+           darkcolor=[("pressed", ACCENT_HOVER), ("active", ACCENT_HOVER)])
 
-    # 위험 동작(삭제)
-    st.configure("Danger.TButton", font=(ui_font, SIZE_SMALL))
+    # ---------- 입력 ----------
+    st.configure("TEntry", fieldbackground=SURFACE, bordercolor=BORDER,
+                 lightcolor=BORDER, darkcolor=BORDER, insertcolor=TEXT, padding=4)
+    st.map("TEntry", bordercolor=[("focus", ACCENT)],
+           lightcolor=[("focus", ACCENT)], darkcolor=[("focus", ACCENT)])
+    st.configure("TSpinbox", fieldbackground=SURFACE, bordercolor=BORDER,
+                 arrowcolor=TEXT_MUTED, padding=3)
+    st.map("TSpinbox", bordercolor=[("focus", ACCENT)],
+           arrowcolor=[("active", ACCENT)])
+    st.configure("TCombobox", fieldbackground=SURFACE, bordercolor=BORDER,
+                 arrowcolor=TEXT_MUTED, padding=3)
+    st.map("TCombobox", bordercolor=[("focus", ACCENT)],
+           arrowcolor=[("active", ACCENT)],
+           fieldbackground=[("readonly", SURFACE)])
 
-    # 제목/부제
-    st.configure("H1.TLabel", font=(ui_font, SIZE_H1, "bold"), foreground=TEXT)
-    st.configure("H2.TLabel", font=(ui_font, SIZE_H2, "bold"), foreground=TEXT)
-    st.configure("Muted.TLabel", font=(ui_font, SIZE_SMALL), foreground=TEXT_MUTED)
-    st.configure("Faint.TLabel", font=(ui_font, SIZE_SMALL), foreground=TEXT_FAINT)
-    st.configure("Accent.TLabel", font=(ui_font, SIZE_BODY, "bold"), foreground=ACCENT)
+    # ---------- 체크/스케일 ----------
+    st.configure("TCheckbutton", background=BG, foreground=TEXT, focuscolor=ACCENT)
+    st.map("TCheckbutton", background=[("active", BG)],
+           indicatorcolor=[("selected", ACCENT), ("!selected", SURFACE)])
+    st.configure("TScale", background=BG, troughcolor=SURFACE_ALT,
+                 bordercolor=BORDER, lightcolor=ACCENT, darkcolor=ACCENT)
+    st.map("TScale", background=[("active", BG)])
 
-    # 표 헤더는 굵게 (sv-ttk에서도 유지되도록 명시)
-    st.configure("Treeview.Heading", font=(ui_font, SIZE_SMALL, "bold"))
+    # ---------- 탭 ----------
+    st.configure("TNotebook", background=BG, bordercolor=BORDER, tabmargins=(2, 4, 2, 0))
+    st.configure("TNotebook.Tab", background=SURFACE_ALT, foreground=TEXT_MUTED,
+                 bordercolor=BORDER, lightcolor=SURFACE_ALT, darkcolor=SURFACE_ALT,
+                 padding=(14, 7), font=(ui, SIZE_BODY))
+    st.map("TNotebook.Tab",
+           background=[("selected", ACCENT), ("active", BORDER)],
+           foreground=[("selected", "#ffffff"), ("active", TEXT)],
+           lightcolor=[("selected", ACCENT)], darkcolor=[("selected", ACCENT)],
+           font=[("selected", (ui, SIZE_BODY, "bold"))])
 
-    return {"ui": ui_font, "plot": plot_font, "themed": themed}
+    # ---------- 표 ----------
+    st.configure("Treeview", background=SURFACE, fieldbackground=SURFACE,
+                 foreground=TEXT, bordercolor=BORDER, rowheight=24)
+    st.map("Treeview", background=[("selected", ACCENT_TINT)],
+           foreground=[("selected", TEXT)])
+    st.configure("Treeview.Heading", background=SURFACE_ALT, foreground=TEXT_MUTED,
+                 bordercolor=BORDER, relief="flat", font=(ui, SIZE_SMALL, "bold"))
+    st.map("Treeview.Heading", background=[("active", BORDER)])
+
+    # ---------- 스크롤바 ----------
+    st.configure("Vertical.TScrollbar", background=SURFACE_ALT, troughcolor=BG,
+                 bordercolor=BG, arrowcolor=TEXT_MUTED)
+    st.map("Vertical.TScrollbar", background=[("active", BORDER_STRONG)])
+
+    # ---------- 텍스트 스타일 ----------
+    st.configure("H1.TLabel", font=(ui, SIZE_H1, "bold"), foreground=TEXT, background=BG)
+    st.configure("H2.TLabel", font=(ui, SIZE_H2, "bold"), foreground=TEXT, background=BG)
+    st.configure("Muted.TLabel", font=(ui, SIZE_SMALL), foreground=TEXT_MUTED, background=BG)
+    st.configure("Faint.TLabel", font=(ui, SIZE_SMALL), foreground=TEXT_FAINT, background=BG)
+    st.configure("Accent.TLabel", font=(ui, SIZE_BODY, "bold"), foreground=ACCENT, background=BG)
+
+    return {"ui": ui, "plot": plot, "themed": themed}
 
 
 def status_colors(kind):

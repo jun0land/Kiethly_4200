@@ -11,7 +11,7 @@ REM
 REM  설치 목록
 REM    1) 32비트 파이썬  (Keithley/BioLED DLL이 32비트 전용)
 REM    2) Git            (업데이트 버튼용)
-REM    3) 파이썬 패키지  openpyxl, sv-ttk, pyserial
+REM    3) 파이썬 패키지  openpyxl, pyserial
 REM    4) 바탕화면 바로가기
 REM ==========================================================
 setlocal EnableDelayedExpansion
@@ -80,9 +80,9 @@ if errorlevel 1 (
 echo(
 
 REM ---------- 파이썬 패키지 ----------
-echo [4/4] 파이썬 패키지 설치 중 ^(openpyxl, sv-ttk, pyserial^)...
+echo [4/4] 파이썬 패키지 설치 중 ^(openpyxl, pyserial^)...
 py -3-32 -m pip install --upgrade --quiet pip
-py -3-32 -m pip install --upgrade --quiet openpyxl sv-ttk pyserial
+py -3-32 -m pip install --upgrade --quiet openpyxl pyserial
 if errorlevel 1 (
   echo       [경고] 패키지 설치에 실패했습니다. 인터넷 연결을 확인하세요.
 ) else (

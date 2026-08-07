@@ -29,9 +29,10 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 MAIN_SCRIPT = "pd_iv_station.py"
 
 # (import 이름, pip 패키지명) — import 이름과 패키지명이 다른 경우가 있다
+# sv-ttk는 쓰지 않는다 — 위젯이 PNG 스프라이트로 그려져 강조색을 파란색에서
+# 바꿀 수 없었다(ui_theme.py 주석 참고). 테마는 내장 clam 을 직접 칠해서 쓴다.
 PACKAGES = [
     ("openpyxl", "openpyxl"),   # 엑셀 내보내기 (필수)
-    ("sv_ttk", "sv-ttk"),       # 현대적 UI 테마 (없으면 기본 테마로 동작)
     ("serial", "pyserial"),     # 레거시 cli_tools 용
 ]
 
@@ -70,18 +71,27 @@ class Launcher(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PD 측정 스테이션 — 런처")
-        self.geometry("720x460")
-        self.minsize(640, 400)
+        self.geometry("760x480")
+        self.minsize(680, 420)
+
+        # 측정 프로그램과 같은 디자인 토큰 적용 (실패해도 그냥 기본 모양)
+        try:
+            sys.path.insert(0, APP_DIR)
+            import ui_theme
+            ui_theme.apply(self)
+        except Exception:  # noqa: BLE001
+            pass
 
         head = ttk.Frame(self, padding=12)
         head.pack(fill="x")
-        ttk.Label(head, text="PD 측정 스테이션", font=("", 14, "bold")).pack(anchor="w")
-        self.ver_lbl = ttk.Label(head, text="버전 확인 중…", foreground="#555")
+        ttk.Label(head, text="PD 측정 스테이션", style="H1.TLabel").pack(anchor="w")
+        self.ver_lbl = ttk.Label(head, text="버전 확인 중…", style="Muted.TLabel")
         self.ver_lbl.pack(anchor="w", pady=(2, 0))
 
         btns = ttk.Frame(self, padding=(12, 0))
         btns.pack(fill="x")
-        self.run_btn = ttk.Button(btns, text="▶  측정 프로그램 실행", command=self.launch_app)
+        self.run_btn = ttk.Button(btns, text="▶  측정 프로그램 실행", style="Accent.TButton",
+                                  command=self.launch_app)
         self.run_btn.pack(side="left", ipady=6, ipadx=10)
         self.upd_btn = ttk.Button(btns, text="⟳  업데이트 (git pull)", command=self.do_update)
         self.upd_btn.pack(side="left", padx=8, ipady=6, ipadx=6)
