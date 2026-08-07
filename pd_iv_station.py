@@ -1377,7 +1377,10 @@ class App(tk.Tk):
                 "write", lambda *_: self._sync_range_compliance("compliance"))
         self._sync_range_compliance("init")
 
-        r += 2
+        # ⚠ rc_note_lbl이 r+2를 쓰므로 여기서는 r+3부터 시작해야 한다.
+        # 예전엔 r += 2 여서 프리셋 줄이 안내문과 **같은 grid 칸**에 겹쳐
+        # 두 번째 줄이 가려졌다(줄바꿈 이후가 안 보이던 원인).
+        r += 3
         btns = ttk.Frame(frame)
         btns.grid(row=r, column=0, columnspan=7, pady=14, sticky="w")
         ttk.Label(btns, text="프리셋:").pack(side="left")
