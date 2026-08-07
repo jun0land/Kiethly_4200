@@ -28,6 +28,13 @@ from tkinter import messagebox, ttk
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 MAIN_SCRIPT = "pd_iv_station.py"
 
+# (import 이름, pip 패키지명) — import 이름과 패키지명이 다른 경우가 있다
+PACKAGES = [
+    ("openpyxl", "openpyxl"),   # 엑셀 내보내기 (필수)
+    ("sv_ttk", "sv-ttk"),       # 현대적 UI 테마 (없으면 기본 테마로 동작)
+    ("serial", "pyserial"),     # 레거시 cli_tools 용
+]
+
 # 콘솔 창이 깜빡이지 않게 (Windows 전용 플래그)
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -78,6 +85,8 @@ class Launcher(tk.Tk):
         self.run_btn.pack(side="left", ipady=6, ipadx=10)
         self.upd_btn = ttk.Button(btns, text="⟳  업데이트 (git pull)", command=self.do_update)
         self.upd_btn.pack(side="left", padx=8, ipady=6, ipadx=6)
+        self.dep_btn = ttk.Button(btns, text="⤓  필수 구성요소 설치/확인", command=self.do_install_deps)
+        self.dep_btn.pack(side="left", padx=(0, 8), ipady=6, ipadx=4)
         ttk.Button(btns, text="폴더 열기", command=lambda: os.startfile(APP_DIR)).pack(side="left", padx=4)
 
         ttk.Label(self, text="상태 / 로그", padding=(12, 8, 12, 0)).pack(anchor="w")
@@ -141,6 +150,53 @@ class Launcher(tk.Tk):
         except Exception as e:  # noqa: BLE001
             self.write(f"✘ 실행 실패: {e}")
             messagebox.showerror("실행 실패", str(e))
+
+    # ---------- 필수 구성요소 ----------
+    def do_install_deps(self):
+        """측정 프로그램이 필요로 하는 파이썬 패키지를 설치/확인한다.
+
+        파이썬 자체가 없는 컴퓨터는 이 런처가 아예 안 뜨므로, 그 경우는
+        '최초설치.bat'(파이썬 없이 도는 배치 파일)이 담당한다."""
+        self.dep_btn.state(["disabled"])
+        self.upd_btn.state(["disabled"])
+        self.run_btn.state(["disabled"])
+        self.write("\n=== 필수 구성요소 확인 ===")
+        threading.Thread(target=self._deps_worker, daemon=True).start()
+
+    def _deps_worker(self):
+        try:
+            py = find_py32()
+            if py is None:
+                self.write("✘ 32비트 파이썬을 찾지 못했습니다.")
+                self.write("  → '최초설치.bat' 을 실행하세요 (파이썬까지 자동 설치합니다).")
+                return
+            self.write(f"32비트 파이썬: {' '.join(py)}")
+
+            need = []
+            for mod, pkg in PACKAGES:
+                ok, _ = run(py + ["-c", f"import {mod}"], timeout=30)
+                self.write(f"  {'✔' if ok else '✘'} {pkg}" + ("" if ok else "  (설치 필요)"))
+                if not ok:
+                    need.append(pkg)
+
+            if not need:
+                self.write("✔ 필요한 패키지가 모두 설치돼 있습니다.")
+                return
+
+            self.write(f"설치 시작: {', '.join(need)} … (인터넷 필요, 잠시 걸립니다)")
+            ok, out = run(py + ["-m", "pip", "install", "--upgrade"] + need, timeout=600)
+            self.write(out[-2000:] if out else "(출력 없음)")
+            if ok:
+                self.write("✔ 설치 완료. 측정 프로그램을 실행하면 반영됩니다.")
+            else:
+                self.write("✘ 설치 실패 — 인터넷 연결 또는 권한 문제일 수 있습니다.")
+        finally:
+            self.after(0, self._deps_done)
+
+    def _deps_done(self):
+        for b in (self.dep_btn, self.upd_btn, self.run_btn):
+            b.state(["!disabled"])
+        self.write("=== 확인 종료 ===\n")
 
     # ---------- 업데이트 ----------
     def do_update(self):

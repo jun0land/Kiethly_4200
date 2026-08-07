@@ -978,6 +978,15 @@ class App(tk.Tk):
         self._busy_widgets = []       # 측정 중 잠글 위젯들
         self._live_partial = None     # 측정 중 실시간으로 그릴 부분 데이터
 
+        # 디자인 토큰/테마 적용 — sv-ttk가 없으면 내장 테마로 자동 대체되므로
+        # 실패해도 프로그램은 그대로 동작한다.
+        try:
+            import ui_theme
+            self.theme = ui_theme.apply(self)
+        except Exception as e:  # noqa: BLE001
+            self.theme = {"ui": "TkDefaultFont", "plot": "TkDefaultFont", "themed": False}
+            print(f"[테마] 적용 실패(무시하고 계속): {e}")
+
         self._build()
         self._on_dry_run_change()
         self._refresh_live_state()   # 시작 시 '● BioLED 미연결'로 표시
@@ -1518,7 +1527,8 @@ class App(tk.Tk):
         ttk.Label(top, text="샘플명").grid(row=0, column=0, sticky="w")
         self.sample_name_var = tk.StringVar(value=self.station_cfg["sample_name"])
         ttk.Entry(top, textvariable=self.sample_name_var, width=20).grid(row=0, column=1, padx=4)
-        self._register_busy_widget(ttk.Button(top, text="새 세션 시작", command=self.start_session)
+        self._register_busy_widget(ttk.Button(top, text="새 세션 시작", style="Accent.TButton",
+                                              command=self.start_session)
         ).grid(row=0, column=2, padx=6)
         self.session_lbl = ttk.Label(top, text="세션: (없음)")
         self.session_lbl.grid(row=0, column=3, padx=10)
@@ -1557,7 +1567,7 @@ class App(tk.Tk):
                                       width=14, state="readonly")
         self.pct_combo.grid(row=0, column=5, padx=4, pady=2)
         self._register_busy_widget(ttk.Button(
-            light_frame, text="선택 광원 I-V 측정",
+            light_frame, text="선택 광원 I-V 측정", style="Accent.TButton",
             command=lambda: self._run_worker(self._measure_photo, what="광전류 I-V"))
         ).grid(row=0, column=6, padx=(16, 0), pady=2)
 
@@ -1619,6 +1629,7 @@ class App(tk.Tk):
         row1 = ttk.Frame(export_bar)
         row1.pack(fill="x")
         self._register_busy_widget(ttk.Button(row1, text="엑셀 내보내기",
+                                              style="Accent.TButton",
                                               command=self.export_excel)
         ).pack(side="left", padx=(0, 12))
         self.bracket_lbl = ttk.Label(row1, text="브래킷: ", font=("", 9, "bold"))
@@ -2126,6 +2137,7 @@ class App(tk.Tk):
                           fill="gray", justify="center")
             return
 
+        pf = self.theme.get("plot", "")   # 그래프 폰트(Myriad Pro 우선)
         margin_l, margin_r, margin_t, margin_b = 55, 12, 10, 28
         plot_w = max(w - margin_l - margin_r, 10)
         plot_h = max(h - margin_t - margin_b, 10)
@@ -2158,13 +2170,13 @@ class App(tk.Tk):
         for dec in range(logmin, logmax + 1):
             y = ypix(10 ** dec)
             c.create_line(margin_l - 4, y, margin_l + plot_w, y, fill="#eee")
-            c.create_text(margin_l - 6, y, text=f"1e{dec}", anchor="e", font=("", 7))
+            c.create_text(margin_l - 6, y, text=f"1e{dec}", anchor="e", font=(pf, 7))
         for k in range(5):
             v = vmin + (vmax - vmin) * k / 4
             x = xpix(v)
             c.create_line(x, margin_t, x, margin_t + plot_h, fill="#eee")
-            c.create_text(x, margin_t + plot_h + 12, text=f"{v:.2f}", font=("", 7))
-        c.create_text(margin_l + plot_w / 2, h - 6, text="Voltage (V)", font=("", 7))
+            c.create_text(x, margin_t + plot_h + 12, text=f"{v:.2f}", font=(pf, 7))
+        c.create_text(margin_l + plot_w / 2, h - 6, text="Voltage (V)", font=(pf, 8))
 
         legend_y = margin_t + 4
         for idx, t in enumerate(traces):
@@ -2177,7 +2189,7 @@ class App(tk.Tk):
                 c.create_line(*pts, fill=color, width=1.6)
             c.create_line(w - margin_r - 46, legend_y + 5, w - margin_r - 28, legend_y + 5,
                          fill=color, width=2)
-            c.create_text(w - margin_r - 24, legend_y + 5, text=t["label"], anchor="w", font=("", 7))
+            c.create_text(w - margin_r - 24, legend_y + 5, text=t["label"], anchor="w", font=(pf, 7))
             legend_y += 13
 
         # 8:10 박스를 캔버스 가운데로 이동 (레터박스)
@@ -2378,7 +2390,7 @@ class App(tk.Tk):
         ttk.Entry(top, textvariable=self.it_light_s_var, width=8).grid(row=1, column=5, pady=(6, 0))
 
         self._register_busy_widget(ttk.Button(
-            frame, text="I-T 측정 시작",
+            frame, text="I-T 측정 시작", style="Accent.TButton",
             command=lambda: self._run_worker(self._measure_it, what="I-T"))
         ).pack(anchor="w", pady=12)
         ttk.Label(frame, text="시퀀스: dark → (가장 약한 세기) → dark → ... → (가장 강한 세기) → dark(끝). "
