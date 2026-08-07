@@ -71,16 +71,16 @@ class Launcher(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PD 측정 스테이션 — 런처")
-        self.geometry("760x480")
-        self.minsize(680, 420)
-
         # 측정 프로그램과 같은 디자인 토큰 적용 (실패해도 그냥 기본 모양)
+        sc = 1.0
         try:
             sys.path.insert(0, APP_DIR)
             import ui_theme
-            ui_theme.apply(self)
+            sc = ui_theme.apply(self).get("scale", 1.0)
         except Exception:  # noqa: BLE001
             pass
+        self.geometry(f"{int(760 * sc)}x{int(480 * sc)}")
+        self.minsize(int(680 * sc), int(420 * sc))
 
         head = ttk.Frame(self, padding=12)
         head.pack(fill="x")
@@ -252,4 +252,11 @@ class Launcher(tk.Tk):
 
 
 if __name__ == "__main__":
+    # ⚠ Tk() 생성 전에 DPI 인식을 켜야 창이 비트맵 확대되지 않는다
+    try:
+        sys.path.insert(0, APP_DIR)
+        import ui_theme
+        ui_theme.enable_hidpi()
+    except Exception:  # noqa: BLE001
+        pass
     Launcher().mainloop()

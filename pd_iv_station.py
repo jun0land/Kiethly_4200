@@ -946,6 +946,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PD 측정 스테이션 — Keithley 4200 + BioLED")
+        # 크기는 테마 적용 후 화면 배율에 맞춰 정한다(_apply_scaled_geometry)
         self.geometry("1280x900")
         # 탭3의 파장/OD/프리셋/버튼 한 줄, 탭1의 8열 SMU 표 등이 이보다 좁으면
         # 버튼이나 안내문구가 잘린다 — 최소 크기를 강제해서 방지.
@@ -983,8 +984,10 @@ class App(tk.Tk):
         try:
             import ui_theme
             self.theme = ui_theme.apply(self)
+            self._apply_scaled_geometry(ui_theme)
         except Exception as e:  # noqa: BLE001
-            self.theme = {"ui": "TkDefaultFont", "plot": "TkDefaultFont", "themed": False}
+            self.theme = {"ui": "TkDefaultFont", "plot": "TkDefaultFont",
+                          "themed": False, "scale": 1.0}
             print(f"[테마] 적용 실패(무시하고 계속): {e}")
 
         self._build()
@@ -1017,6 +1020,20 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self._drain_after_id = self.after(150, self._drain_queue)
+
+    def _apply_scaled_geometry(self, ui_theme):
+        """창·최소 크기를 화면 배율에 맞게 키운다.
+
+        DPI 인식을 켜면 1논리픽셀 = 1실제픽셀이 되어 예전 픽셀값 그대로는
+        150% 모니터에서 창이 2/3 크기로 쪼그라든다. 그래서 배율만큼 곱해준다.
+        화면보다 커지지 않도록 상한도 둔다."""
+        sc = self.theme.get("scale", 1.0)
+        w, h = int(1280 * sc), int(900 * sc)
+        mw, mh = int(1150 * sc), int(780 * sc)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(w, sw - 40), min(h, sh - 80)
+        self.geometry(f"{w}x{h}")
+        self.minsize(min(mw, sw - 40), min(mh, sh - 80))
 
     def _register_busy_widget(self, w):
         """측정 중 잠글 위젯 등록. 측정과 무관한 것(로그창, 그래프, 폴더 열기)은
@@ -1677,7 +1694,9 @@ class App(tk.Tk):
         plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일, 10:8 비율)", padding=4)
         # 기본 크기도 10:8(가로가 긴 형태)로 맞춘다. 창을 늘리거나 구분선을
         # 옮겨도 실제 작도 영역은 _redraw_plot에서 다시 10:8로 맞춘다.
-        self.plot_canvas = tk.Canvas(plot_frame, width=560, height=448, background="white",
+        _sc = self.theme.get("scale", 1.0)
+        self.plot_canvas = tk.Canvas(plot_frame, width=int(560 * _sc), height=int(448 * _sc),
+                                     background="white",
                                      highlightthickness=1, highlightbackground="#ccc")
         self.plot_canvas.pack(fill="both", expand=True)
         self.plot_canvas.bind("<Configure>", lambda e: self._redraw_plot())
@@ -2513,6 +2532,13 @@ class App(tk.Tk):
 
 
 def main():
+    # ⚠ 반드시 Tk() 생성 전에. DPI 인식을 안 하면 Windows가 창을 비트맵으로
+    # 확대해 글자가 뭉개진다(해상도가 낮아 보이는 원인).
+    try:
+        import ui_theme
+        ui_theme.enable_hidpi()
+    except Exception:  # noqa: BLE001
+        pass
     if "--check-bitness" in sys.argv:
         bits = 8 * ctypes.sizeof(ctypes.c_void_p)
         print(f"{bits}-bit")

@@ -32,8 +32,55 @@ NBEDL-Exp-Assistant / Photodetector I-V Studio(둘 다 Streamlit)와 색·폰트
 
 from __future__ import annotations
 
+import sys
 import tkinter.font as tkfont
 from tkinter import ttk
+
+
+# ---------------- 고해상도(HiDPI) ----------------
+def enable_hidpi():
+    """⚠ Tk() 를 만들기 **전에** 호출해야 한다.
+
+    DPI 인식을 안 하면 Windows가 그 프로세스에게 "화면은 96 DPI"라고 거짓말한
+    뒤, 1배로 그려진 창을 배율만큼 **비트맵 확대**해 버린다. 그래서 글자·선이
+    뭉개져 '해상도가 낮아 보이는' 증상이 생긴다.
+    (이 PC 실측: 레지스트리 AppliedDPI=144(150%)인데 DPI 비인식 프로세스에는
+     96으로 보고됨 — 정확히 이 현상)
+
+    DPI 인식을 켜면 화면 픽셀 그대로 그려서 선명해진다. 대신 1논리픽셀 =
+    1실제픽셀이 되어 UI가 작아지므로, apply()에서 배율만큼 다시 키운다.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+    # PER_MONITOR_AWARE_V2 (Win10 1703+) — 모니터마다 배율이 달라도 대응
+    try:
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # PROCESS_PER_MONITOR_DPI_AWARE (Win8.1+)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # 시스템 전역 DPI 인식 (Vista+)
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def dpi_scale(root):
+    """이 창의 실제 배율. 1.0 = 100%, 1.5 = 150%."""
+    try:
+        return float(root.winfo_fpixels("1i")) / 96.0
+    except Exception:  # noqa: BLE001
+        return 1.0
+
+
+def sx(root, px):
+    """픽셀 값을 화면 배율에 맞게 환산 (창 크기·캔버스 크기 등에 사용)."""
+    return int(round(px * dpi_scale(root)))
 
 # ---------------- 디자인 토큰 ----------------
 ACCENT = "#ed542b"          # 주 강조 (버튼, 선택, 강조 텍스트)
@@ -91,6 +138,15 @@ def apply(root):
         themed = True
     except Exception:  # noqa: BLE001
         themed = False
+
+    # Tk 의 포인트→픽셀 환산 기준을 실제 화면 DPI에 맞춘다.
+    # 이렇게 해야 폰트 크기를 포인트로 지정한 것이 어떤 배율의 모니터에서도
+    # 같은 물리적 크기로 보인다. (숫자를 배율만큼 곱하면 이중 확대가 된다)
+    scale = dpi_scale(root)
+    try:
+        root.tk.call("tk", "scaling", root.winfo_fpixels("1i") / 72.0)
+    except Exception:  # noqa: BLE001
+        pass
 
     for name, size in (("TkDefaultFont", SIZE_BODY), ("TkTextFont", SIZE_BODY),
                        ("TkMenuFont", SIZE_BODY), ("TkHeadingFont", SIZE_H2),
@@ -195,7 +251,7 @@ def apply(root):
     st.configure("Faint.TLabel", font=(ui, SIZE_SMALL), foreground=TEXT_FAINT, background=BG)
     st.configure("Accent.TLabel", font=(ui, SIZE_BODY, "bold"), foreground=ACCENT, background=BG)
 
-    return {"ui": ui, "plot": plot, "themed": themed}
+    return {"ui": ui, "plot": plot, "themed": themed, "scale": scale}
 
 
 def status_colors(kind):
