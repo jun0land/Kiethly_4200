@@ -3,6 +3,13 @@ sessions/
 it_data/
 cli_tools/iv_data/
 
+# 사용자별 설정/프리셋 — 노트북마다 값이 다르다.
+# 이걸 추적하면 git pull 할 때마다 충돌이 나서 업데이트가 막힌다.
+station_config.json
+station_presets.json
+bioled_presets.json
+bioled_settings.json
+
 # 파이썬 캐시
 __pycache__/
 *.pyc
