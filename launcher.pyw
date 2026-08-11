@@ -215,32 +215,104 @@ class Launcher(tk.Tk):
         self.write("\n=== 업데이트 시작 ===")
         threading.Thread(target=self._update_worker, daemon=True).start()
 
+    @staticmethod
+    def _diagnose(text):
+        """git 출력에서 **실제 원인**을 찾아 구체적인 해결책을 돌려준다.
+
+        예전에는 실패하면 '흔한 원인' 목록을 그대로 찍었는데, 그게 오히려
+        엉뚱한 곳(로그인 문제)을 짚게 만들었다. 추측 목록 대신 출력에 있는
+        단서로 분류한다."""
+        t = (text or "").lower()
+        if any(k in t for k in ("could not resolve host", "failed to connect",
+                                "timed out", "network is unreachable",
+                                "unable to access")):
+            return ("네트워크에 연결하지 못했습니다.",
+                    "인터넷 연결을 확인하세요. 사내망/방화벽이면 GitHub 접근이\n"
+                    "   막혀 있을 수 있습니다(휴대폰 핫스팟으로 시험해 보세요).")
+        if any(k in t for k in ("authentication failed", "could not read username",
+                                "could not read password", "permission denied",
+                                "403", "invalid username or password")):
+            return ("GitHub 인증에 실패했습니다.",
+                    "이 저장소는 공개(Public)라 원래 로그인 없이 받아집니다.\n"
+                    "   원격 주소가 SSH(git@github.com:...)로 되어 있으면 키가 필요하니\n"
+                    "   HTTPS 주소로 바꾸세요:\n"
+                    "     git remote set-url origin https://github.com/jun0land/Kiethly_4200.git")
+        if "not a git repository" in t:
+            return ("이 폴더가 git 저장소가 아닙니다.",
+                    "폴더를 '복사'해 오면 업데이트가 안 됩니다. 아래처럼 받아야 합니다:\n"
+                    "     git clone https://github.com/jun0land/Kiethly_4200.git")
+        if any(k in t for k in ("non-fast-forward", "diverged",
+                                "not possible to fast-forward", "unrelated histories")):
+            return ("이 컴퓨터의 이력이 GitHub와 갈라졌습니다.",
+                    "이 폴더에서 코드를 직접 고쳐 커밋했을 때 생깁니다.\n"
+                    "   측정용 PC라면 GitHub 것으로 맞추는 게 간단합니다:\n"
+                    "     git fetch origin && git reset --hard origin/main\n"
+                    "   ⚠ 이 폴더의 로컬 수정은 사라집니다(설정 파일은 무시 목록이라 안전).")
+        if any(k in t for k in ("would be overwritten", "local changes",
+                                "please commit your changes", "stash")):
+            return ("이 폴더에서 추적 중인 파일을 고쳐 놔서 덮어쓸 수 없습니다.",
+                    "고친 내용을 버리고 GitHub 것으로 맞추려면:\n"
+                    "     git checkout -- .\n"
+                    "   그다음 업데이트를 다시 누르세요.")
+        return ("원인을 자동으로 분류하지 못했습니다.",
+                "위 'git 출력' 내용을 그대로 복사해서 문의하세요.")
+
     def _update_worker(self):
         try:
+            # --- 0) 저장소인지 먼저 확인 (복사해 온 폴더면 여기서 끝) ---
+            if not os.path.isdir(os.path.join(APP_DIR, ".git")):
+                self.write("✘ 이 폴더는 git 저장소가 아닙니다(복사해 온 폴더).")
+                self.write("  git clone https://github.com/jun0land/Kiethly_4200.git 로 받아야 합니다.")
+                return
+
+            ok, url = run(["git", "remote", "get-url", "origin"])
+            if not ok or not url.strip():
+                self.write("✘ 원격 저장소(origin)가 설정돼 있지 않습니다.")
+                self.write("  git remote add origin https://github.com/jun0land/Kiethly_4200.git")
+                return
+            self.write(f"원격: {url.strip()}")
+
             ok, out = run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
             branch = out.strip() if ok else "main"
             self.write(f"브랜치: {branch}")
 
-            # 내 쪽에 커밋 안 된 수정이 있으면 pull이 막힐 수 있으니 미리 알린다
-            ok, out = run(["git", "status", "--porcelain"])
-            if ok and out.strip():
-                self.write("⚠ 로컬에 수정된 파일이 있습니다:")
-                self.write(out)
-                self.write("  (설정 파일이라면 무시해도 됩니다 — .gitignore에 등록돼 있으면 여기 안 뜹니다)")
+            # --- 1) 네트워크 단계와 병합 단계를 분리해서 원인을 좁힌다 ---
+            self.write("GitHub에서 최신 정보를 받는 중…")
+            ok, out = run(["git", "fetch", "origin", branch], timeout=180)
+            if not ok:
+                self.write("--- git 출력 ---")
+                self.write(out or "(출력 없음)")
+                why, how = self._diagnose(out)
+                self.write(f"✘ {why}")
+                self.write(f"  → {how}")
+                return
 
-            ok, out = run(["git", "pull", "--ff-only", "origin", branch], timeout=180)
+            # --- 2) 얼마나 뒤처졌는지/앞섰는지 ---
+            ok, counts = run(["git", "rev-list", "--left-right", "--count",
+                              f"origin/{branch}...HEAD"])
+            behind = ahead = 0
+            if ok and counts.split():
+                parts = counts.split()
+                if len(parts) >= 2:
+                    behind, ahead = int(parts[0]), int(parts[1])
+            if behind == 0 and ahead == 0:
+                self.write("✔ 이미 최신 버전입니다.")
+                return
+            if ahead > 0:
+                self.write(f"⚠ 이 컴퓨터에만 있는 커밋이 {ahead}개 있습니다 "
+                           "— 이력이 갈라져 자동 업데이트가 막힙니다.")
+            self.write(f"받아올 새 커밋: {behind}개")
+
+            # --- 3) 실제 반영 ---
+            ok, out = run(["git", "merge", "--ff-only", f"origin/{branch}"], timeout=180)
+            self.write("--- git 출력 ---")
             self.write(out or "(출력 없음)")
             if ok:
-                if "Already up to date" in out or "이미 최신" in out:
-                    self.write("✔ 이미 최신 버전입니다.")
-                else:
-                    self.write("✔ 업데이트 완료. 측정 프로그램을 다시 실행하면 반영됩니다.")
+                self.write("✔ 업데이트 완료. 측정 프로그램을 다시 실행하면 반영됩니다.")
             else:
-                self.write("✘ 업데이트 실패.")
-                self.write("  흔한 원인:\n"
-                           "   · 인터넷/GitHub 로그인 문제\n"
-                           "   · 이 폴더에서 코드를 직접 고쳐서 충돌 (git status 확인)\n"
-                           "   · --ff-only 라서 갈라진 이력은 자동 병합하지 않음")
+                why, how = self._diagnose(out)
+                self.write(f"✘ {why}")
+                self.write(f"  → {how}")
         finally:
             self.after(0, self._update_done)
 
