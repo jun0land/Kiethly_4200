@@ -96,6 +96,13 @@ SWEEP_OPTS = ["1:Linear", "2:Log10", "3:Log25", "4:Log50"]
 # 가로가 긴 형태 — 분석 앱 pd_app의 기본 페이지(10 x 8 in)와도 같은 방향.
 ASPECT_W, ASPECT_H = 10, 8
 
+class MeasurementAborted(Exception):
+    """사용자가 '측정 중단'을 눌렀을 때. 오류가 아니라 정상 흐름이라
+    로그도 오류가 아닌 안내로 남긴다."""
+
+
+UI_OK = "#0a7d28"      # 연결됨 표시용 (ui_theme.OK_FG 와 동일)
+
 _NUM = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
 # KXCI list-mode 응답 토큰은 "N-1.00000E+00"처럼 앞에 한 글자 상태 코드가
 # 붙는다(공백 있는 경우도 있음: "N 0.00000E+00"). 그룹1=상태코드, 그룹2=숫자.
@@ -335,12 +342,23 @@ class Keithley4200:
         self.dll.GetKXCISpollByte_C(ctypes.byref(spb), ctypes.byref(sock_err))
         return spb.value
 
-    def wait_done(self, poll_s=0.2, max_wait_s=120, on_tick=None):
+    def wait_done(self, poll_s=0.2, max_wait_s=120, on_tick=None, should_abort=None):
+        """측정 완료(Data Ready)를 기다린다.
+
+        should_abort: 매 폴링마다 호출되는 함수. True를 돌려주면 장비에 중단
+        명령(ME6)을 보내고 False를 반환한다 — 사용자가 '측정 중단'을 누른 경우."""
         if self.dry:
             return True
         t0 = time.time()
         first_poll = True
         while time.time() - t0 < max_wait_s:
+            if should_abort is not None and should_abort():
+                self.log("    측정 중단 요청 — 장비에 ME6 전송")
+                try:
+                    self.abort()
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"    ⚠ 중단 명령 실패(무시): {e}")
+                return False
             status = self.spoll()
             if status & BIT_SYNTAX_ERR:
                 self.log("    ⚠ KXCI Syntax Error 비트 감지 — 직전 명령 문법 확인 필요")
@@ -471,6 +489,12 @@ class Keithley4200:
         self._w("BC")
         self._w("MD")
         self._w("ME1")
+
+    def abort(self):
+        """진행 중인 측정을 장비 쪽에서 중단시킨다 (매뉴얼 5.5절: ME6 = 중단)."""
+        self._w("MD")
+        self._w("ME6")
+        self._w("BC")   # 중단하면서 남은 버퍼/Data Ready 비트도 정리
 
     def fetch(self, name):
         return self._fetch(name)
@@ -993,6 +1017,7 @@ class App(tk.Tk):
         self._live_applying = False   # 스냅용 set()의 재진입 방지
         self._live_error = None       # 마지막 적용 실패 사유(예외 대신 여기 담음)
         self._busy_widgets = []       # 측정 중 잠글 위젯들
+        self._abort_evt = threading.Event()   # '측정 중단' 요청 플래그
         self._live_partial = None     # 측정 중 실시간으로 그릴 부분 데이터
 
         # 디자인 토큰/테마 적용 (실패해도 기본 모양으로 그대로 동작)
@@ -1007,7 +1032,7 @@ class App(tk.Tk):
 
         self._build()
         self._on_dry_run_change()
-        self._refresh_live_state()   # 시작 시 '● BioLED 미연결'로 표시
+        self._refresh_conn_ui()      # 시작 시 버튼/상태 표시를 미연결로 맞춤
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._drain_after_id = self.after(150, self._drain_queue)
 
@@ -1081,6 +1106,11 @@ class App(tk.Tk):
                 w.state(["disabled"] if busy else ["!disabled"])
             except Exception:  # noqa: BLE001 — 파괴된 위젯 등
                 pass
+        # 중단 버튼만 반대로 — 측정 중에 눌러야 하는 버튼이다
+        try:
+            self.abort_btn.state(["!disabled"] if busy else ["disabled"])
+        except Exception:  # noqa: BLE001
+            pass
         if busy:
             self.busy_lbl.config(text=f"● 측정 중… {what}".rstrip(),
                                  background="#fff3cd", foreground="#7a5b00")
@@ -1090,21 +1120,51 @@ class App(tk.Tk):
             self.busy_lbl.config(text="○ 대기", background=self._busy_lbl_bg,
                                  foreground="#666")
 
+    def abort_measurement(self):
+        """진행 중인 측정을 중단한다.
+
+        워커 스레드를 강제로 죽이지 않는다(장비가 어중간한 상태로 남는다).
+        대신 플래그를 세우고, 측정 루프가 안전한 지점에서 스스로 빠져나오며
+        장비에 ME6(중단)를 보내고 광원을 끄도록 한다."""
+        if not self.busy:
+            return
+        if not messagebox.askyesno(
+                "측정 중단",
+                "진행 중인 측정을 중단할까요?\n\n"
+                "중단된 측정은 트레이스로 저장되지 않습니다.\n"
+                "(광원은 자동으로 꺼집니다)",
+                icon="warning", default="no"):
+            return
+        self._abort_evt.set()
+        self.log("■ 측정 중단 요청 — 안전한 지점에서 정지합니다…")
+        self.abort_btn.state(["disabled"])   # 중복 클릭 방지
+
     def _run_worker(self, fn, *args, what=""):
         if self.busy:
             messagebox.showwarning("측정 중", "이전 측정이 아직 끝나지 않았습니다.")
             return
         self.busy = True
         self._busy_what = what
+        self._abort_evt.clear()
         self._set_busy_ui(True, what)
 
         def _wrap():
             try:
                 fn(*args)
+            except MeasurementAborted:
+                # 사용자가 의도한 중단이므로 오류가 아니다
+                self.log("■ 측정을 중단했습니다. (이 측정은 저장되지 않음)")
             except Exception as e:  # noqa: BLE001
                 self.log(f"✘ 오류: {e}")
             finally:
+                # 중단이든 오류든 광원은 반드시 끈다 (소자 보호)
+                try:
+                    if self._live_is_on or self._live_wl:
+                        self.after(0, self.live_off)
+                except Exception:  # noqa: BLE001
+                    pass
                 self.busy = False
+                self._abort_evt.clear()
                 # UI 조작은 반드시 메인 스레드에서
                 self.after(0, lambda: self._set_busy_ui(False))
 
@@ -1123,12 +1183,16 @@ class App(tk.Tk):
         # --- Keithley 상태 ---
         self.conn_status = ttk.Label(top, text="● Keithley 미연결", foreground="gray")
         self.conn_status.pack(side="left")
-        ttk.Button(top, text="Keithley 연결", command=self.connect_smu).pack(side="left", padx=4)
+        # 연결/해제를 한 버튼으로 토글한다 — 장비가 혼자 끊겼을 때 개별로
+        # 다시 붙일 수 있어야 해서(모두 해제만으로는 불편)
+        self.smu_btn = ttk.Button(top, text="Keithley 연결", width=16, command=self.toggle_smu)
+        self.smu_btn.pack(side="left", padx=4)
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         # --- BioLED 상태 (연결 여부를 한눈에) ---
         self.led_status = ttk.Label(top, text="● BioLED 미연결", foreground="gray")
         self.led_status.pack(side="left")
-        ttk.Button(top, text="BioLED 연결", command=self.connect_led).pack(side="left", padx=4)
+        self.led_btn = ttk.Button(top, text="BioLED 연결", width=16, command=self.toggle_led)
+        self.led_btn.pack(side="left", padx=4)
         ttk.Button(top, text="LED 포트 배정", command=self.edit_led_channels).pack(side="left", padx=2)
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Button(top, text="모두 해제", command=self.disconnect_all).pack(side="left", padx=4)
@@ -1164,13 +1228,13 @@ class App(tk.Tk):
     # 보이기 때문. (실측 모드 연결 실패를 며칠간 못 찾은 원인이 정확히 이것)
     def connect_smu(self):
         if self.smu is not None:
-            self.log("[4200] 이미 연결되어 있습니다 (해제 후 다시 연결하세요)")
+            self.log("[4200] 이미 연결되어 있습니다")
             return
         self.log(f"[4200] 연결 중… {IP.decode()}:{PORT}")
         try:
             self.smu = Keithley4200(dry=self.dry_run.get(), log=self.log)
-            self.conn_status.config(text="● Keithley 연결됨", foreground="green")
             self.log("[4200] 연결 완료")
+            self._refresh_conn_ui()
         except BaseException as e:  # noqa: BLE001 — 위 주석 참조
             self.log(f"✘ Keithley 연결 실패: {type(e).__name__}: {e}")
             messagebox.showerror("연결 실패", f"{type(e).__name__}\n\n{e}")
@@ -1183,12 +1247,8 @@ class App(tk.Tk):
         try:
             self.led = BioLED(dry=self.dry_run.get(), log=self.log)
             self.log("[LED] 연결됨")
-            nch = self.led.channels
-            self.led_status.config(
-                text=f"● BioLED 연결됨 (ch 1~{nch})" if nch else "● BioLED 연결됨",
-                foreground="green")
-            self._warn_channel_mapping(nch)
-            self._refresh_live_state()
+            self._refresh_conn_ui()
+            self._warn_channel_mapping(self.led.channels)
         except BaseException as e:  # noqa: BLE001
             self.log(f"✘ BioLED 연결 실패: {type(e).__name__}: {e}")
             messagebox.showerror(
@@ -1197,11 +1257,53 @@ class App(tk.Tk):
                 "USB 케이블이 데이터선 포함인지, "
                 "BioLEDController.exe가 완전히 종료됐는지 확인하세요.")
 
-    def disconnect_all(self):
+    # ---------- 연결/해제 토글 ----------
+    def toggle_smu(self):
+        if self.smu is None:
+            self.connect_smu()
+        else:
+            if self.busy:
+                messagebox.showwarning("측정 중", "측정이 진행 중입니다.\n"
+                                                 "'측정 중단'을 먼저 누르세요.")
+                return
+            if not messagebox.askyesno(
+                    "Keithley 연결 해제",
+                    "Keithley 4200 연결을 해제할까요?\n\n"
+                    "해제해도 지금까지 측정한 트레이스는 남아 있고,\n"
+                    "'Keithley 연결'을 다시 눌러 재연결할 수 있습니다.",
+                    icon="question", default="no"):
+                return
+            self.disconnect_smu()
+
+    def toggle_led(self):
+        if self.led is None:
+            self.connect_led()
+        else:
+            if self.busy:
+                messagebox.showwarning("측정 중", "측정이 진행 중입니다.\n"
+                                                 "'측정 중단'을 먼저 누르세요.")
+                return
+            extra = "\n\n⚠ 지금 광원이 켜져 있습니다 — 해제하면서 끕니다." if self._live_is_on else ""
+            if not messagebox.askyesno(
+                    "BioLED 연결 해제",
+                    f"BioLED 연결을 해제할까요?{extra}",
+                    icon="question", default="no"):
+                return
+            self.disconnect_led()
+
+    def disconnect_smu(self):
+        """Keithley만 개별 해제. (장비가 혼자 끊겼을 때 재연결용)"""
         if self.smu:
-            self.smu.close()
+            try:
+                self.smu.close()
+            except Exception as e:  # noqa: BLE001
+                self.log(f"⚠ Keithley 해제 중 오류(무시): {e}")
             self.smu = None
-            self.conn_status.config(text="● 미연결", foreground="gray")
+            self.log("[4200] 연결 해제됨")
+        self._refresh_conn_ui()
+
+    def disconnect_led(self):
+        """BioLED만 개별 해제."""
         if self.led:
             # 해제 전에 실시간 출력부터 끈다 — 광원이 켜진 채 연결만 끊기면
             # 프로그램에서 더 이상 끌 방법이 없어진다.
@@ -1209,11 +1311,38 @@ class App(tk.Tk):
                 self.live_off()
             except Exception:  # noqa: BLE001
                 pass
-            self.led.close()
+            try:
+                self.led.close()
+            except Exception as e:  # noqa: BLE001
+                self.log(f"⚠ BioLED 해제 중 오류(무시): {e}")
             self.led = None
-            self.led_status.config(text="● BioLED 미연결", foreground="gray")
+            self.log("[LED] 연결 해제됨")
         self._live_is_on = False
         self._live_wl = None
+        self._refresh_conn_ui()
+
+    def disconnect_all(self):
+        self.disconnect_led()      # 광원부터 (소자 보호)
+        self.disconnect_smu()
+
+    def _refresh_conn_ui(self):
+        """연결 상태에 맞게 버튼 글자와 상태 표시를 갱신한다."""
+        if self.smu is None:
+            self.conn_status.config(text="● Keithley 미연결", foreground="gray")
+            self.smu_btn.config(text="Keithley 연결")
+        else:
+            self.conn_status.config(text="● Keithley 연결됨", foreground=UI_OK)
+            self.smu_btn.config(text="Keithley 연결 해제")
+
+        if self.led is None:
+            self.led_status.config(text="● BioLED 미연결", foreground="gray")
+            self.led_btn.config(text="BioLED 연결")
+        else:
+            nch = self.led.channels
+            self.led_status.config(
+                text=f"● BioLED 연결됨 (ch 1~{nch})" if nch else "● BioLED 연결됨",
+                foreground=UI_OK)
+            self.led_btn.config(text="BioLED 연결 해제")
         self._refresh_live_state()
 
     def _warn_channel_mapping(self, nch):
@@ -1597,9 +1726,14 @@ class App(tk.Tk):
             command=lambda: self._run_worker(self._measure_dark, "pos", what="Dark 0→+1V"))
         ).grid(row=0, column=6, padx=3)
         # 지금 측정 중인지 항상 보이게 (측정 중에는 조작 버튼이 잠긴다)
-        self.busy_lbl = tk.Label(top, text="○ 대기", width=34, anchor="w",
+        self.busy_lbl = tk.Label(top, text="○ 대기", width=30, anchor="w",
                                  font=("", 9, "bold"), fg="#666")
-        self.busy_lbl.grid(row=0, column=7, padx=(14, 0))
+        self.busy_lbl.grid(row=0, column=7, padx=(14, 4))
+        # 측정 중에만 활성화되는 중단 버튼 (busy 위젯으로 등록하면 안 된다 —
+        # 측정 중에 잠겨버려서 정작 눌러야 할 때 못 누른다)
+        self.abort_btn = ttk.Button(top, text="■ 측정 중단", command=self.abort_measurement)
+        self.abort_btn.grid(row=0, column=8, padx=2)
+        self.abort_btn.state(["disabled"])
         self._busy_lbl_bg = self.busy_lbl.cget("background")
 
         light_frame = ttk.LabelFrame(frame, text="광전류 (−1→+1V, 한번에)", padding=8)
@@ -2294,8 +2428,12 @@ class App(tk.Tk):
         # 끝나야(Data Ready) DO로 데이터를 주기 때문에, 점이 찍히는 걸 실시간으로
         # 보여줄 수는 없다 — 대신 '얼마나 진행됐는지'를 숫자로 보여준다.
         base = getattr(self, "_busy_what", "")
-        self.smu.wait_done(on_tick=lambda el: self.after(
-            0, self._set_busy_ui, True, f"{base}  {el:4.1f}s / 예상 {expected}점"))
+        done = self.smu.wait_done(
+            on_tick=lambda el: self.after(
+                0, self._set_busy_ui, True, f"{base}  {el:4.1f}s / 예상 {expected}점"),
+            should_abort=self._abort_evt.is_set)
+        if not done and self._abort_evt.is_set():
+            raise MeasurementAborted()
         elapsed = time.time() - t_trig
         v_pairs = self.smu.fetch_with_status(sweep_ch["vname"])
         i_pairs = self.smu.fetch_with_status(sweep_ch["iname"])
@@ -2532,15 +2670,26 @@ class App(tk.Tk):
             events.append((round(time.time() - t0, 3), seg_label))
             elapsed_target += dur
             edge = t0 + elapsed_target
-            # I-T는 구간 진행이 눈에 보이는 측정이라 남은 시간까지 표시한다
+            # I-T는 구간 진행이 눈에 보이는 측정이라 남은 시간까지 표시한다.
+            # 여기서도 중단 요청을 확인한다 — I-T는 수십 초~수 분이라
+            # 중간에 멈출 수 있어야 한다.
             while time.time() < edge:
+                if self._abort_evt.is_set():
+                    self.led.off(ch_info["channel"])
+                    try:
+                        self.smu.abort()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise MeasurementAborted()
                 self.after(0, self._set_busy_ui, True,
                           f"I-T  {k}/{n_seg}구간 [{seg_label}]  "
                           f"{time.time()-t0:.0f}/{total_s:.0f}s")
                 time.sleep(0.2 if edge - time.time() > 0.2 else 0.01)
         self.led.off(ch_info["channel"])
 
-        self.smu.wait_done()
+        ok = self.smu.wait_done(should_abort=self._abort_evt.is_set)
+        if not ok and self._abort_evt.is_set():
+            raise MeasurementAborted()
         t = self.smu.fetch("T")
         i = self.smu.fetch(ch["iname"])
         if not t:
@@ -2565,7 +2714,9 @@ class App(tk.Tk):
         if fixed_range is not None:
             self.smu.set_range_fixed(ch["ch"], fixed_range, compliance)
         self.smu.trigger()
-        self.smu.wait_done()
+        ok = self.smu.wait_done(should_abort=self._abort_evt.is_set)
+        if not ok and self._abort_evt.is_set():
+            raise MeasurementAborted()
         i = self.smu.fetch(ch["iname"])
         t = list(range(len(i)))
         return list(zip(t, i))
