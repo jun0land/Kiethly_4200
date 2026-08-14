@@ -1752,6 +1752,8 @@ class App(tk.Tk):
         self.pct_combo = ttk.Combobox(light_frame, textvariable=self.preset_pct_var,
                                       width=14, state="readonly")
         self.pct_combo.grid(row=0, column=5, padx=4, pady=2)
+        # 변수 trace가 아니라 <<ComboboxSelected>>로 거는 이유는 _on_preset_selected 참고.
+        self.pct_combo.bind("<<ComboboxSelected>>", self._on_preset_selected)
         self._register_busy_widget(ttk.Button(
             light_frame, text="선택 광원 I-V 측정", style="Accent.TButton",
             command=lambda: self._run_worker(self._measure_photo, what="광전류 I-V"))
@@ -1764,13 +1766,22 @@ class App(tk.Tk):
         self.live_pct_var = tk.DoubleVar(value=0.0)
         self.live_scale = ttk.Scale(live, from_=0.0, to=100.0, orient="horizontal",
                                     variable=self.live_pct_var, length=260,
+                                    takefocus=True,
                                     command=lambda _v: self._on_live_scale())
         self.live_scale.grid(row=0, column=0, padx=(0, 8), pady=2)
+        # 클릭하면 포커스를 받아, 그 뒤 ↑↓키로 숫자칸과 똑같이 0.1 %씩 미세조정.
+        # ⚠ 여기서 "break"를 돌려주면 ttk.Scale 본래의 클릭-드래그가 죽는다.
+        self.live_scale.bind("<Button-1>", lambda e: self.live_scale.focus_set(), add="+")
+        for _key, _delta in (("<Up>", 0.1), ("<Right>", 0.1),
+                             ("<Down>", -0.1), ("<Left>", -0.1)):
+            self.live_scale.bind(_key, lambda e, d=_delta: self._on_live_scale_key(d))
 
         # Spinbox는 위/아래 화살표키가 기본 동작이라 미세조정에 유리.
         # 슬라이더(드래그)와 같은 변수를 공유해 양쪽이 항상 동기화된다.
+        # Big.TSpinbox = 화살표 버튼이 마우스로 집기 힘들 만큼 작아서 키운 스타일.
         self.live_spin = ttk.Spinbox(live, from_=0.0, to=100.0, increment=0.1,
                                      textvariable=self.live_pct_var, width=8,
+                                     style="Big.TSpinbox",
                                      format="%.1f", command=self._apply_live_percent)
         self.live_spin.grid(row=0, column=1, pady=2)
         ttk.Label(live, text="%").grid(row=0, column=2, padx=(2, 10))
@@ -1795,7 +1806,8 @@ class App(tk.Tk):
                   ).grid(row=0, column=9, padx=2)
 
         ttk.Label(live, foreground="gray",
-                 text="슬라이더 드래그 / 숫자칸 ↑↓키로 0.1 %씩 → 즉시 반영. "
+                 text="슬라이더 드래그 / 슬라이더·숫자칸 클릭 후 ↑↓키로 0.1 %씩 → 즉시 반영. "
+                      "세기 프리셋을 고르면 그 값이 바로 들어옴. "
                       "OD = ND 필터 값(OD0=필터 없음), 새 OD는 직접 입력."
                  ).grid(row=1, column=0, columnspan=10, sticky="w", pady=(2, 0))
 
@@ -1904,7 +1916,54 @@ class App(tk.Tk):
         else:
             self.preset_pct_var.set("")
 
+    def _on_preset_selected(self, _event=None):
+        """세기 프리셋을 **사용자가 드롭다운에서 직접 고른 경우에만** 그 %를
+        실시간 세기 조절에 반영한다.
+
+        preset_pct_var에 trace를 걸지 않는 이유: _refresh_led_presets()가 파장/OD가
+        바뀔 때마다 current(0)으로, edit_led_preset()도 저장 후 current(idx)로 변수를
+        덮어쓴다. trace로 걸면 파워미터 보며 애써 맞춰둔 슬라이더 값이 그런 자동
+        갱신에 조용히 날아간다."""
+        wl = self._wl_key()
+        od = self.od_var.get().strip() or DEFAULT_OD
+        presets = self.led_presets.get(wl, {}).get(od, [])
+        idx = self.pct_combo.current()
+        if idx < 0 or idx >= len(presets):
+            return
+        p = presets[idx]
+        # 콤보박스 표시 문자열("라벨 (12.3 %)")을 파싱하지 않고 원본 값을 쓴다 —
+        # 라벨에 괄호나 %가 들어가도 안전하다.
+        try:
+            percent = round(float(p["percent"]), 1)
+        except (TypeError, ValueError, KeyError):
+            return
+        self.live_pct_var.set(percent)
+        # set()이 Scale의 command를 유발해 60 ms debounce가 예약된다. 프리셋 선택은
+        # '즉시 반영'이 의도이므로 그 예약을 취소하고 직접 적용한다(같은 값을 장비에
+        # 두 번 보내지 않게).
+        if self._live_after_id:
+            self.after_cancel(self._live_after_id)
+            self._live_after_id = None
+        # 실패해도 예외를 밖으로 던지지 않는다 — _apply_live_percent가 이미 로그를 남긴다.
+        self._apply_live_percent()
+        self.log(f"[LED] 프리셋 선택: {PRETTY_LABEL[wl]} · {od} · "
+                f"{p.get('label', '?')}({percent}%) → 실시간 세기 반영")
+
     # ---------- 실시간 세기 조절 ----------
+    def _on_live_scale_key(self, delta):
+        """슬라이더에 포커스가 있을 때 ↑↓(←→)로 숫자칸과 똑같이 0.1 %씩 조정.
+
+        ⚠ 반드시 "break"를 돌려줘야 한다 — ttk::scale의 class binding이 화살표키를
+        가상이벤트(<<PrevLine>>/<<NextChar>> 등)로 받아 1.0씩 움직인다. instance
+        binding이 먼저 실행되므로 break하지 않으면 둘 다 적용돼, ↑ 한 번에
+        +0.1−1.0 = −0.9로 오히려 반대로 간다(실측 확인).
+        적용은 기존 debounce 경로(_on_live_scale)를 재사용한다. 키를 누르고 있으면
+        auto-repeat로 초당 수십 번 들어오는데, 그때마다 장비를 호출하면 안 된다."""
+        v = round(min(100.0, max(0.0, float(self.live_pct_var.get()) + delta)), 1)
+        self.live_pct_var.set(v)
+        self._on_live_scale()  # set()이 이미 건 타이머를 취소하고 하나만 남긴다
+        return "break"
+
     def _on_live_scale(self):
         """슬라이더 드래그 중 호출. 이벤트가 매우 잦으므로 debounce."""
         if self._live_after_id:

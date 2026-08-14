@@ -205,6 +205,11 @@ def apply(root):
                  arrowcolor=TEXT_MUTED, padding=3)
     st.map("TSpinbox", bordercolor=[("focus", ACCENT)],
            arrowcolor=[("active", ACCENT)])
+    # 실시간 세기 입력칸용 — clam 기본 arrowsize(10)는 위/아래 버튼이 마우스로
+    # 집기 힘들 만큼 작다. 높이는 arrowsize가 알아서 늘려주므로(10->26px, 18->40px)
+    # 세로 padding은 그대로 두고, 커진 화살표에 글자가 붙지 않게 가로만 넓힌다.
+    # 색/포커스 map은 부모 TSpinbox 것이 그대로 상속된다(중복 map 불필요).
+    st.configure("Big.TSpinbox", arrowsize=18, padding=(4, 3))
     st.configure("TCombobox", fieldbackground=SURFACE, bordercolor=BORDER,
                  arrowcolor=TEXT_MUTED, padding=3)
     st.map("TCombobox", bordercolor=[("focus", ACCENT)],
