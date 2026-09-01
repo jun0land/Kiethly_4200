@@ -64,7 +64,7 @@ if errorlevel 1 (
         --accept-package-agreements --accept-source-agreements --silent
   if errorlevel 1 (
     echo(
-    echo [오류] winget 이 파이썬 설치에 실패했습니다.
+    echo [오류] winget 이 파이썬 설치에 실패했습니다. ^(msstore 소스 문제일 수 있음^)
     echo        아래 명령을 이 창에 직접 붙여넣어 재시도해 보세요:
     echo(
     echo          winget source reset --force
