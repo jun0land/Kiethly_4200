@@ -1074,6 +1074,31 @@ py -3.13-32 pd_iv_station.py
 BioLEDController.exe 완전 종료 여부, BLS 전원 여부, USB 케이블 데이터선
 포함 여부를 확인)
 
+### 10.1 `socket_err` 값으로 원인 구분하기
+
+연결 실패 시 `RuntimeError: KXCI 연결 실패 (socket_err=N)` 의 **N을 먼저 볼 것.**
+값에 따라 확인할 곳이 완전히 다르다.
+
+| socket_err | 의미 | 원인과 조치 |
+|---|---|---|
+| `0` | 정상 | 연결 성공 (`ret=1` 이 정상값) |
+| `10060` (WSAETIMEDOUT) | SYN에 **아무 응답 없음** | 패킷이 4200까지 도달조차 못 함. **네트워크 경로 문제** — 아래 참조 |
+| `10061` (WSAECONNREFUSED) | 장비는 응답하나 포트가 안 열림 | KXCI 미실행. 4200에서 **KITE 완전 종료 후 KXCI 실행** |
+
+**⚠ `10060`이면 KXCI/KITE 상태를 아무리 확인해도 소용없다.** 이 시스템은
+PC가 **Wi-Fi로 ipTIME Extender-A3MU에 붙어야** 4200에 닿는 구조(4.1절)라,
+실제로 겪은 원인은 **PC가 다른 Wi-Fi(건물 공용 AP 등)를 잡은 것**이었다.
+2026-09-01 실제 사례: 새 PC 세팅 중 노트북 Wi-Fi가 다른 SSID로 바뀌어 발생.
+
+```powershell
+netsh wlan show interfaces | findstr /i "SSID 상태"   # 익스텐더 SSID 인지 확인
+ipconfig | findstr /i "IPv4"                          # 192.168.0.x 대역인지 확인
+```
+
+IPv4가 `192.168.0.x`가 아니면 그 즉시 원인 확정 — Wi-Fi를 익스텐더
+네트워크로 다시 연결하면 된다. 대역이 맞는데도 ping이 안 되면 그때
+익스텐더 전원/랜선, 4200 전원을 본다.
+
 ---
 
 ## 11. 참고 — 분석 앱(`pd_app`) 쪽 별건 이슈
