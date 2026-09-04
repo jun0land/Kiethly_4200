@@ -794,8 +794,20 @@ DEFAULT_STATION_PRESETS = {
 }
 
 # HID 장치라 포트/보드레이트 개념이 없다 — 파장 -> BioLED 채널 번호만 있으면 됨.
+#
+# ⚠ 기본값은 **전부 1번 포트**다. 예전 기본값은 파장 순서대로 1~8번을 배정했는데,
+#   이건 8채널 장비를 가정한 것이라 실제 장비에서 거의 항상 틀렸다. 실측 사례:
+#   2채널 장비(BLS)에 LED를 1번 포트 하나에만 꽂아 쓰는데, 940 nm는 1번으로
+#   배정돼 불이 들어오고 850 nm는 2번으로 배정돼 조용히 안 들어왔다. 2번은 장비에
+#   실제로 있는 채널이라 _check_channel 도 못 걸러낸다("포트는 있는데 아무것도
+#   안 꽂혀 있다"는 건 소프트웨어가 알 방법이 없다). 게다가 드롭다운 표시가
+#   "8: 940 nm"라서 8번 포트로 나갈 것처럼 보이는데 실제로는 1번이었다 — 그
+#   숫자는 엑셀 브래킷 코드지 포트 번호가 아니다.
+#   전부 1번이면 최소한 "LED가 꽂힌 포트"일 확률이 가장 높고, 채널이 몇 개인
+#   장비든 1번은 반드시 존재한다. 포트를 여러 개 쓰는 환경에서만 상단
+#   'LED 포트 배정'에서 바꾸면 된다.
 DEFAULT_BIOLED_SETTINGS = {
-    "channels": {wl: {"channel": i + 1} for i, wl in enumerate(WAVELENGTHS)},
+    "channels": {wl: {"channel": 1} for wl in WAVELENGTHS},
 }
 DEFAULT_OD = "OD0"
 # 프리셋을 파장 -> OD(ND필터 값) -> [{"label","percent"}, ...] 로 묶어둔다.
@@ -1346,8 +1358,20 @@ class App(tk.Tk):
         self._refresh_live_state()
 
     def _warn_channel_mapping(self, nch):
-        """장비 채널 수보다 큰 번호로 배정된 파장이 있으면 미리 경고한다.
-        (예전에는 없는 채널로 명령을 보내 ret=-1만 뜨고 원인을 알 수 없었다)"""
+        """지금 파장이 어느 포트로 나가는지 로그에 남기고, 장비 채널 수보다 큰
+        번호로 배정된 파장이 있으면 미리 경고한다.
+        (예전에는 없는 채널로 명령을 보내 ret=-1만 뜨고 원인을 알 수 없었다)
+
+        배정을 항상 찍는 이유: 불이 안 들어올 때 원인이 "포트 배정"이라는 걸
+        알아채기가 매우 어렵다. 드롭다운의 "8: 940 nm"는 엑셀 브래킷 코드고
+        포트 번호가 아닌데, 둘 다 1~8이라 같은 것처럼 보인다. 실제로 940 nm가
+        1번 포트로 나가는 것을 눈으로 확인할 수 있어야 한다."""
+        chans = self.led_settings.get("channels", {})
+        self.log("[LED] 파장 -> 포트 배정: " + ", ".join(
+            f"{PRETTY_LABEL[wl]}=포트{chans.get(wl, {}).get('channel', '?')}"
+            for wl in WAVELENGTHS if wl in PRETTY_LABEL))
+        self.log("       (드롭다운의 '8: 940 nm' 앞 숫자는 엑셀 브래킷 코드이지 "
+                "포트 번호가 아닙니다)")
         if not nch or nch <= 0:
             return
         bad = [PRETTY_LABEL[wl] for wl, info in self.led_settings.get("channels", {}).items()

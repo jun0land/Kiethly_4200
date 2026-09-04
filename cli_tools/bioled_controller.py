@@ -44,11 +44,15 @@ BLS_MODE_NORMAL = 1
 # ---- 채널 기본값 (환경에 맞게 수정) ----
 DEFAULT_SETTINGS = {
     # 파장 -> {"channel": BioLED 채널번호} — HID 장치라 포트/max_mA 불필요
+    # 기본값을 전부 1번 포트로 둔다. 파장마다 다른 번호를 기본으로 주면
+    # LED가 꽂히지 않은 포트로 명령이 나가서 "오류도 없는데 불만 안 들어오는"
+    # 상황이 된다(pd_iv_station.py의 DEFAULT_BIOLED_SETTINGS 주석 참고).
+    # 채널이 몇 개인 장비든 1번은 반드시 있다.
     "channels": {
         "365nm": {"channel": 1},
-        "470nm": {"channel": 2},
-        "530nm": {"channel": 3},
-        "625nm": {"channel": 4},
+        "470nm": {"channel": 1},
+        "530nm": {"channel": 1},
+        "625nm": {"channel": 1},
     },
 }
 
