@@ -1635,13 +1635,28 @@ class App(tk.Tk):
         if self.range_mode_var.get() != "RI":
             self.rc_note_lbl.config(
                 text="※ 고정 레인지(RI)가 아니면 Range↔컴플라이언스 자동 보정을 하지 않습니다.")
+            self._last_range_A = range_A
             return
 
         self._rc_syncing = True
         try:
             if source in ("range", "init"):
                 cap = max_compliance_for(range_A)
+                prev_A = getattr(self, "_last_range_A", None)
+                raised = (source == "range" and prev_A is not None
+                          and range_A > prev_A * (1 + 1e-9))
                 for k in keys:
+                    # Range를 키웠을 때, 이전 Range에 맞춰 둔 컴플라이언스(이전 Range의
+                    # 95% 이상)는 같은 비율로 새 Range를 따라 올린다. 일부러 낮게 잡아 둔
+                    # 값(95% 미만)은 소자 보호용일 수 있으므로 그대로 둔다.
+                    if raised and comps[k] >= prev_A * 0.95 - 1e-30:
+                        new_c = float(f"{comps[k] * range_A / prev_A:.6g}")
+                        new_c = min(new_c, cap)
+                        if abs(new_c - comps[k]) > 1e-30:
+                            self.mvars[k]["compliance"].set(new_c)
+                            self.log(f"[설정] {k} 컴플라이언스 {comps[k]:g} A → {new_c:g} A 자동 상향 "
+                                    f"(Range {format_range_i(prev_A)} → {format_range_i(range_A)})")
+                        continue
                     if comps[k] > cap * (1 + 1e-9):
                         self.mvars[k]["compliance"].set(cap)
                         self.log(f"[설정] {k} 컴플라이언스 {comps[k]:g} A → {cap:g} A 자동 조정 "
@@ -1656,6 +1671,7 @@ class App(tk.Tk):
                     range_A = new_r
         finally:
             self._rc_syncing = False
+            self._last_range_A = self._current_range_A()
 
         cap = max_compliance_for(self._current_range_A())
         self.rc_note_lbl.config(
@@ -1716,6 +1732,9 @@ class App(tk.Tk):
         self.it_plc_var.set(p["integration"]["plc"])
         self.resolution_var.set(p["resolution_digits"])
         self.range_mode_var.set(p["range_mode"])
+        # 프리셋 값은 이미 서로 맞는 조합이므로, Range 상향 연동(컴플라이언스 동반 상향)이
+        # 불러온 값을 덮어쓰지 않도록 이전 Range 기록을 지우고 설정한다.
+        self._last_range_A = None
         self.range_val_var.set(RANGE_LABELS.get(p["range_A"], RANGE_LABELS[FIXED_RANGES_A[0]]))
         self.range_dark_same_var.set(p["range_dark_same"])
         self.log(f"[프리셋] '{name}' 불러옴")
@@ -1750,13 +1769,15 @@ class App(tk.Tk):
             command=lambda: self._run_worker(self._measure_dark, "pos", what="Dark 0→+1V"))
         ).grid(row=0, column=6, padx=3)
         # 지금 측정 중인지 항상 보이게 (측정 중에는 조작 버튼이 잠긴다)
-        self.busy_lbl = tk.Label(top, text="○ 대기", width=30, anchor="w",
+        # 진행 문구("경과 s / 예상 N점")가 길어서 같은 줄에 두면 오른쪽 버튼에 가려지거나
+        # 잘리므로, 버튼 줄 아래에 한 줄을 통째로 써서 전체 문구가 항상 보이게 한다.
+        self.busy_lbl = tk.Label(top, text="○ 대기", anchor="w",
                                  font=("", 9, "bold"), fg="#666")
-        self.busy_lbl.grid(row=0, column=7, padx=(14, 4))
+        self.busy_lbl.grid(row=1, column=0, columnspan=9, sticky="we", pady=(4, 0))
         # 측정 중에만 활성화되는 중단 버튼 (busy 위젯으로 등록하면 안 된다 —
         # 측정 중에 잠겨버려서 정작 눌러야 할 때 못 누른다)
         self.abort_btn = ttk.Button(top, text="■ 측정 중단", command=self.abort_measurement)
-        self.abort_btn.grid(row=0, column=8, padx=2)
+        self.abort_btn.grid(row=0, column=7, padx=(14, 2))
         self.abort_btn.state(["disabled"])
         self._busy_lbl_bg = self.busy_lbl.cget("background")
 
@@ -1876,8 +1897,11 @@ class App(tk.Tk):
         mid.pack(fill="both", expand=True, pady=8)
 
         list_frame = ttk.LabelFrame(mid, text="측정된 트레이스 (가운데 선을 드래그해 폭 조절)", padding=8)
-        self.trace_tree = ttk.Treeview(list_frame, columns=("label", "range"),
+        self.trace_tree = ttk.Treeview(list_frame, columns=("show", "label", "range"),
                                        show="headings", height=8)
+        self.trace_tree.heading("show", text="그래프")
+        self.trace_tree.column("show", width=50, stretch=False, anchor="center")
+        self.trace_tree.bind("<Button-1>", self._on_trace_tree_click)
         self.trace_tree.heading("label", text="라벨")
         self.trace_tree.heading("range", text="Range I")
         self.trace_tree.column("label", width=110, stretch=True)
@@ -1885,6 +1909,8 @@ class App(tk.Tk):
         self.trace_tree.pack(fill="both", expand=True, side="left")
         btn_col = ttk.Frame(list_frame)
         btn_col.pack(side="left", padx=8, fill="y")
+        ttk.Button(btn_col, text="그래프 보기/숨기기",
+            command=self.toggle_selected_visibility).pack(pady=2, fill="x")
         self._register_busy_widget(ttk.Button(btn_col, text="선택 삭제",
             command=self.delete_selected_trace)).pack(pady=2, fill="x")
         self._register_busy_widget(ttk.Button(btn_col, text="라벨 수정",
@@ -1893,7 +1919,7 @@ class App(tk.Tk):
             command=lambda: self.move_selected(-1))).pack(pady=2, fill="x")
         self._register_busy_widget(ttk.Button(btn_col, text="아래로 ▼",
             command=lambda: self.move_selected(1))).pack(pady=2, fill="x")
-        ttk.Label(btn_col, text="중간 삭제·순서 변경\n모두 가능", foreground="gray",
+        ttk.Label(btn_col, text="그래프 칸(☑/☐)을 누르면\n보기·숨기기 전환\n중간 삭제·순서 변경 가능", foreground="gray",
                  justify="left").pack(pady=(8, 0), anchor="w")
 
         plot_frame = ttk.LabelFrame(mid, text="그래프 (누적, |I| 로그스케일, 10:8 비율)", padding=4)
@@ -2270,7 +2296,8 @@ class App(tk.Tk):
             self._redraw_plot()
             return
         for t in self.session.traces:
-            self.trace_tree.insert("", "end", values=(t["label"], t["range_i_str"]))
+            self.trace_tree.insert("", "end", values=(
+                "☐" if t.get("hidden") else "☑", t["label"], t["range_i_str"]))
         bracket = self.session.bracket_code()
         self.bracket_lbl.config(text=f"브래킷: {bracket}")
         # "엑셀 내보내기"를 누르면 실제로 저장될 이름을 미리 보여준다 —
@@ -2279,6 +2306,36 @@ class App(tk.Tk):
         name = self.sample_name_var.get().strip() or (self.session.sample_name if self.session else "")
         self.filename_lbl.config(text=f"내보낼 파일명:  ({safe_filename(name)})[{bracket}].xlsx")
         self._redraw_plot()
+
+    def _on_trace_tree_click(self, event):
+        """'그래프' 칸(☑/☐)을 누르면 그 트레이스를 그래프에서 보이거나 숨긴다.
+        측정 데이터와 엑셀 내보내기에는 영향이 없다(그래프 표시만 바뀜)."""
+        if self.trace_tree.identify_region(event.x, event.y) != "cell":
+            return
+        if self.trace_tree.identify_column(event.x) != "#1":
+            return
+        row = self.trace_tree.identify_row(event.y)
+        if not row or not self.session:
+            return
+        self._toggle_visibility(self.trace_tree.index(row))
+        return "break"
+
+    def _toggle_visibility(self, idx):
+        if not self.session or not (0 <= idx < len(self.session.traces)):
+            return
+        t = self.session.traces[idx]
+        t["hidden"] = not t.get("hidden", False)
+        self._refresh_trace_list()
+        children = self.trace_tree.get_children()
+        if idx < len(children):
+            self.trace_tree.selection_set(children[idx])
+
+    def toggle_selected_visibility(self):
+        idx = self._selected_index()
+        if idx is None:
+            messagebox.showinfo("선택 없음", "그래프에서 보이거나 숨길 트레이스를 목록에서 먼저 선택하세요.")
+            return
+        self._toggle_visibility(idx)
 
     def _selected_index(self):
         sel = self.trace_tree.selection()
@@ -2413,7 +2470,13 @@ class App(tk.Tk):
             c.create_text(cw // 2, ch_ // 2, text="측정된 트레이스 없음", fill="gray")
             return
 
-        traces = self.session.traces
+        all_traces = self.session.traces
+        traces = [t for t in all_traces if not t.get("hidden")]
+        if not traces:
+            c.create_text(cw // 2, ch_ // 2, text="모든 트레이스가 숨겨져 있습니다\n"
+                                                  "(목록의 그래프 칸 ☐를 눌러 다시 표시)",
+                          fill="gray", justify="center")
+            return
         all_v = [v for t in traces for v, i, *_ in t["data"]]
         if not all_v:
             c.create_text(cw // 2, ch_ // 2, text="표시할 데이터 포인트가 없습니다\n"
@@ -2463,7 +2526,9 @@ class App(tk.Tk):
         c.create_text(margin_l + plot_w / 2, h - 6, text="Voltage (V)", font=(pf, 8))
 
         legend_y = margin_t + 4
-        for idx, t in enumerate(traces):
+        for idx, t in enumerate(all_traces):
+            if t.get("hidden"):
+                continue   # 색 순서가 바뀌지 않게 숨긴 트레이스도 번호는 센다
             color = TRACE_COLORS.get(t["label"], FALLBACK_TRACE_COLORS[idx % len(FALLBACK_TRACE_COLORS)])
             pts = []
             for v, i, *_ in t["data"]:
